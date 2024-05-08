@@ -32,6 +32,8 @@ jobs:
         #git push --set-upstream origin updates/upstream
       
     - name: Create Pull Request
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
       run: |
         gh pr create -R laurasfo/demisto-content -B master -t "Merge upstream changes" --body "This PR merges the latest changes from the upstream repository."
         
