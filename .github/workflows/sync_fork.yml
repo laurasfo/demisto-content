@@ -5,6 +5,8 @@ on:
     - cron: '0 0 1 * *'  # At 00:00 on day-of-month 1.
   workflow_dispatch:  # Allows manual triggering
 
+permissions: write-all
+
 jobs:
   sync:
     runs-on: ubuntu-latest
