@@ -2,7 +2,7 @@ name: Sync Fork
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Runs every day at midnight
+    - cron: '0 0 1 * *'  # At 00:00 on day-of-month 1.
   workflow_dispatch:  # Allows manual triggering
 
 jobs:
@@ -18,14 +18,16 @@ jobs:
 
     - name: Fetch Upstream
       run: |
-        git remote add upstream https://github.com/demisto/content.git  # Replace with the URL of the upstream repo
+        git remote add upstream https://github.com/demisto/content.git  
         git fetch upstream
 
+    - name: Create Branch and pull changes
+      run: |
+        git checkout -b updates/upstream
+        git pull upstream master --no-rebase
+        git push --set-upstream origin updates/upstream
+      
     - name: Create Pull Request
-      uses: peter-evans/create-pull-request@v6
-      with:
-        token: ${{ github.token }}
-        commit-message: "Merge upstream changes"
-        title: "Merge upstream changes"
-        body: "This PR merges the latest changes from the upstream repository."
-        branch: "merge-upstream-changes"  # The branch to create for the PR
+      run: |
+        gh pr create -R laurasfo/demisto-content -B master -t "Merge upstream changes" --body "This PR merges the latest changes from the upstream repository."
+        
