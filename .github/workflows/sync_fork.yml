@@ -4,7 +4,8 @@ on:
   schedule:
     - cron: '0 0 1 * *'  # At 00:00 on day-of-month 1.
   workflow_dispatch:  # Allows manual triggering
-
+env:
+  GITHUB_TOKEN: ${{ github.token }}
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -22,18 +23,13 @@ jobs:
         git fetch upstream
 
     - name: Create Branch and pull changes
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
       run: |
         git config --global user.email "actions@github.com"
         git config --global user.name "GitHub Action"
         git checkout -b updates/upstream
         git pull upstream master --no-rebase
-        #git push --set-upstream origin updates/upstream
       
     - name: Create Pull Request
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
       run: |
-        gh pr create -R laurasfo/demisto-content -B master -t "Merge upstream changes" --body "This PR merges the latest changes from the upstream repository."
+        gh pr create -R laurasfo/demisto-content -B master --head updates/upstream -t "Merge upstream changes" --body "This PR merges the latest changes from the upstream repository."
         
