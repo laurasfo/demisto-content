@@ -29,7 +29,7 @@ jobs:
         git config --global user.name "GitHub Action"
         git checkout -b updates/upstream
         git pull upstream master --no-rebase
-        git push --set-upstream origin updates/upstream
+        #git push --set-upstream origin updates/upstream
       
     - name: Create Pull Request
       run: |
