@@ -5,11 +5,13 @@ on:
 
 
 jobs:
-  deploy:
-    runs-on: ubuntu-22.04
+  printJob:    
+    name: Print event
+    runs-on: ubuntu-latest
     steps:
-    - name: echo event
+    - name: Dump GitHub context
+      env:
+        GITHUB_CONTEXT: ${{ toJson(github) }}
       run: |
-        echo ${{github.event.issue.number}}
-        echo ${{github.event.issue}}
+        echo "$GITHUB_CONTEXT"
         
