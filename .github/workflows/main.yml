@@ -14,11 +14,21 @@ jobs:
         GITHUB_CONTEXT: ${{ toJson(github) }}
       run: |
         echo "$GITHUB_CONTEXT"
-  printLabels:    
+  printData:    
     name: Print label
     runs-on: ubuntu-latest
     steps:
     - name: print Labels
       run: |
         echo ${{github.event.issue.labels.*.name}}
-        
+    - name: Extract tag from comment
+      id: extract_tag
+      run: echo "::set-output name=tag::$(echo ${{ github.event.issue.body }} | grep -oP 'tag:\K(\d*-).*' )"
+    - name: Verify if tag exists
+      run: |
+        if git rev-parse --quiet --verify ${{ steps.extract_tag.outputs.tag }} >/dev/null; then
+          echo "Tag exists"
+        else
+          echo "Tag does not exist"
+          exit 1
+        fi
