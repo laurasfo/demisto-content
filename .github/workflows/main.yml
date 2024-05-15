@@ -1,0 +1,13 @@
+name: Deploy PRO
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-22.04
+    if: contains(github.event.issue.labels.name, 'deployment') && contains(github.event.issue.labels.name, 'environment/pro') && contains(github.event.issue.labels.name, 'release-type/current')
+    steps:
+    - name: echo tags
+      run: echo  "I have many tags" {{github.event.issue.labels.name}}
+    
