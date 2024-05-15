@@ -8,6 +8,6 @@ jobs:
   deploy:
     runs-on: ubuntu-22.04
     steps:
-    - name: echo tags
-      run: echo  "I have many tags" ${{github.event.issue.labels.name}}
+    - name: echo event
+      run: echo  ${{github.event}}
     
