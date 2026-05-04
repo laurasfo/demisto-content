@@ -1,12 +1,13 @@
 import importlib
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest import mock
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import dateparser
 import demistomock as demisto
 import Elasticsearch_v2
+import json
 import pytest
 import requests
 
@@ -63,6 +64,33 @@ ES_V7_RESPONSE = {
         ],
     },
 }
+
+ES_V8_RESPONSE = {
+    "took": 8,
+    "timed_out": False,
+    "_shards": {"total": 1, "successful": 1, "skipped": 0, "failed": 0},
+    "hits": {
+        "total": {"value": 9, "relation": "eq"},
+        "max_score": 0.8,
+        "hits": [
+            {
+                "_index": "customer",
+                "_type": "doc",
+                "_id": "888",
+                "_score": 0.8,
+                "_source": {"Date": "2024-08-27T18:00:00Z"},
+            },
+            {
+                "_index": "customer",
+                "_type": "doc",
+                "_id": "999",
+                "_score": 0.79,
+                "_source": {"Date": "2024-08-27T18:01:25.343212Z"},
+            },
+        ],
+    },
+}
+
 
 MOCK_ES7_SEARCH_CONTEXT = str(
     {
@@ -429,6 +457,18 @@ MOCK_PARAMS = [
     },
 ]
 
+PARAMS_V8 = {
+    "client_type": "Elasticsearch_v8",
+    "fetch_index": "customer",
+    "fetch_time_field": "Date",
+    "time_method": "Simple-Date",
+    "map_labels": True,
+    "credentials": {
+        "identifier": "mock",
+        "password": "demisto",
+    },
+}
+
 
 @pytest.mark.parametrize("params", MOCK_PARAMS)
 def test_context_creation_es7(params, mocker):
@@ -584,6 +624,38 @@ def test_elasticsearch_builder_called_with_no_creds(params, mocker):
     elasticsearch_builder(None)
     assert es_mock.call_args[1].get("http_auth") is None
     assert es_mock.call_args[1].get("api_key") is None
+    assert es_mock.call_args[1].get("bearer_auth") is None
+
+
+@pytest.mark.parametrize("params", MOCK_PARAMS)
+def test_elasticsearch_builder_called_with_cred(params, mocker):
+    mocker.patch.object(demisto, "params", return_value=params)
+    importlib.reload(Elasticsearch_v2)  # To reset the Elasticsearch client with the OpenSearch library
+    mocker.patch("Elasticsearch_v2.USERNAME", "username")
+    mocker.patch("Elasticsearch_v2.PASSWORD", "password")
+    mocker.patch("Elasticsearch_v2.AUTH_TYPE", Elasticsearch_v2.BASIC_AUTH)
+    from Elasticsearch_v2 import Elasticsearch, elasticsearch_builder
+
+    es_mock = mocker.patch.object(Elasticsearch, "__init__", return_value=None)
+    elasticsearch_builder(None)
+    assert es_mock.call_args[1].get("http_auth")[0] == "username"
+    assert es_mock.call_args[1].get("http_auth")[1] == "password"
+    assert es_mock.call_args[1].get("api_key") is None
+    assert es_mock.call_args[1].get("bearer_auth") is None
+
+    mocker.patch("Elasticsearch_v2.AUTH_TYPE", Elasticsearch_v2.API_KEY_AUTH)
+    mocker.patch("Elasticsearch_v2.API_KEY", "api_key_id")
+    elasticsearch_builder(None)
+    assert es_mock.call_args[1].get("http_auth") is None
+    assert es_mock.call_args[1].get("api_key") == "api_key_id"
+    assert es_mock.call_args[1].get("bearer_auth") is None
+
+    mocker.patch("Elasticsearch_v2.AUTH_TYPE", Elasticsearch_v2.BEARER_AUTH)
+    mocker.patch("Elasticsearch_v2.get_elastic_token", return_value="elastic_token")
+    elasticsearch_builder(None)
+    assert es_mock.call_args[1].get("http_auth") is None
+    assert es_mock.call_args[1].get("api_key") is None
+    assert es_mock.call_args[1].get("bearer_auth") == "elastic_token"
 
 
 @pytest.mark.parametrize("params", MOCK_PARAMS)
@@ -715,6 +787,46 @@ def test_get_time_range(time_method, last_fetch, time_range_start, time_range_en
     assert get_time_range(last_fetch, time_range_start, time_range_end, "time_field") == result
 
 
+@pytest.mark.parametrize(
+    "time_method, time_range_start, expected_time_zone",
+    [
+        ("Simple-Date", "2024-01-15T10:30:00+02:00", "+02:00"),
+        ("Simple-Date", "2024-01-15T10:30:00-05:00", "-05:00"),
+        ("Simple-Date", "2024-01-15T10:30:00+03:30", "+03:30"),
+        ("Simple-Date", "2024-01-15T10:30:00-11:00", "-11:00"),
+        ("Timestamp-Seconds", "2024-01-15T10:30:00+02:00", "+02:00"),
+        ("Timestamp-Milliseconds", "2024-01-15T10:30:00-05:00", "-05:00"),
+        ("Simple-Date", "2024-01-15T10:30:00Z", None),
+        ("Simple-Date", "2024-01-15T10:30:00", None),
+    ],
+)
+def test_get_time_range_with_utc_offset(time_method, time_range_start, expected_time_zone):
+    """
+    Test that UTC offset is correctly extracted from time_range_start and added to range_dict.
+
+    Given:
+        - A time_range_start with various UTC offset formats (+HH:MM or -HH:MM)
+        - Different time methods (Simple-Date, Timestamp-Seconds, Timestamp-Milliseconds)
+
+    When:
+        - Calling get_time_range with the time_range_start parameter
+
+    Then:
+        - The UTC offset should be extracted and added to range_dict as 'time_zone'
+        - If no UTC offset is present (Z or no offset), time_zone should not be in range_dict
+    """
+    Elasticsearch_v2.TIME_METHOD = time_method
+    from Elasticsearch_v2 import get_time_range
+
+    result = get_time_range(last_fetch=None, time_range_start=time_range_start, time_range_end=None, time_field="time_field")
+
+    if expected_time_zone:
+        assert "time_zone" in result["range"]["time_field"]
+        assert result["range"]["time_field"]["time_zone"] == expected_time_zone
+    else:
+        assert "time_zone" not in result["range"]["time_field"]
+
+
 def test_build_eql_body():
     from Elasticsearch_v2 import build_eql_body
 
@@ -775,22 +887,34 @@ def test_search_command_with_query_dsl(mocker):
 
     Then
      - make sure that the index is being taken from the command arguments and not from integration parameters
-     - make sure that the size / page arguments are getting called when using query_dsl
+     - make sure that the size / page arguments are getting applied when using query_dsl
     """
     import Elasticsearch_v2
 
     Elasticsearch_v2.FETCH_INDEX = "index from parameter"
     index_from_arg = "index from arg"
-    mocker.patch.object(demisto, "args", return_value={"index": index_from_arg, "query_dsl": "test", "size": "5", "page": "0"})
+    mocker.patch.object(
+        demisto,
+        "args",
+        return_value={"index": index_from_arg, "query_dsl": '{"query": {"match": {"name": "test"}}}', "size": "5", "page": "0"},
+    )
     search_mock = mocker.patch.object(Elasticsearch_v2.Elasticsearch, "search", return_value=ES_V7_RESPONSE)
     mocker.patch.object(Elasticsearch_v2.Elasticsearch, "__init__", return_value=None)
     Elasticsearch_v2.search_command({})
-    assert search_mock.call_args.kwargs["index"] == index_from_arg
-    assert search_mock.call_args.kwargs["size"] == 5
-    assert search_mock.call_args.kwargs["from_"] == 0
+    assert search_mock.call_args.kwargs["index"] == [index_from_arg]
+    assert search_mock.call_args.kwargs["body"] == {"query": {"match": {"name": "test"}}, "size": 5, "from": 0}
 
 
-def test_execute_raw_query(mocker):
+@pytest.mark.parametrize(
+    "raw_query_body",
+    [
+        ({"query": {"match": {"name": "test"}}, "size": 2, "from": 1}),
+        ({"query": {"match": {"name": "test"}}, "size": 2}),
+        ({"query": {"match": {"name": "test"}}, "from": 3}),
+        ({"query": {"match": {"name": "test"}}}),
+    ],
+)
+def test_execute_raw_query(mocker, raw_query_body):
     """
     Given
       - index and elastic search objects
@@ -808,7 +932,50 @@ def test_execute_raw_query(mocker):
     mocker.patch.object(Elasticsearch_v2.Elasticsearch, "search", return_value=ES_V7_RESPONSE)
     mocker.patch.object(Elasticsearch_v2.Elasticsearch, "__init__", return_value=None)
     es = Elasticsearch_v2.elasticsearch_builder({})
-    assert Elasticsearch_v2.execute_raw_query(es, "dsadf") == ES_V7_RESPONSE
+    assert Elasticsearch_v2.execute_raw_query(es, json.dumps(raw_query_body)) == ES_V7_RESPONSE
+
+
+@patch.dict("os.environ", {"DEMISTO_PARAMS": str(PARAMS_V8)})
+@pytest.mark.parametrize(
+    "raw_query_body",
+    [
+        ({"query": {"match": {"name": "test"}}, "size": 2, "from": 1}),
+        ({"query": {"match": {"name": "test"}}, "size": 2}),
+        ({"query": {"match": {"name": "test"}}, "from": 3}),
+        ({"query": {"match": {"name": "test"}}}),
+    ],
+)
+def test_execute_raw_query_v8(mocker, raw_query_body):
+    """
+    Given
+      - index and elastic search objects
+      - instance configured to v8
+
+    When
+    - executing execute_raw_query function with query_dsl body
+
+    Then
+     - make sure that no exception was raised from the function.
+     - make sure the response came back correctly.
+     - make sure the query body can be serialized an does not throw errors.
+    """
+    import Elasticsearch_v2
+    from elastic_transport import RequestsHttpNode
+
+    Elasticsearch_v2.RequestsHttpNode = RequestsHttpNode
+
+    class CustomExecute:
+        def to_dict():  # type: ignore
+            return ES_V8_RESPONSE
+
+    mocker.patch.object(Elasticsearch_v2, "ELASTIC_SEARCH_CLIENT", Elasticsearch_v2.ELASTICSEARCH_V8)
+    mocker.patch.object(Elasticsearch_v2.Elasticsearch, "search", return_value=ES_V7_RESPONSE)
+    mocker.patch.object(Elasticsearch_v2.Search, "execute", return_value=CustomExecute)
+    mocker.patch.object(Elasticsearch_v2.Elasticsearch, "__init__", return_value=None)
+    mocker.patch.object(RequestsHttpNode, "__init__", return_value=None)
+
+    es = Elasticsearch_v2.elasticsearch_builder({})
+    assert Elasticsearch_v2.execute_raw_query(es, json.dumps(raw_query_body)) == ES_V8_RESPONSE
 
 
 @pytest.mark.parametrize(
@@ -1043,3 +1210,281 @@ def test_verify_es_server_version_errors(mocker, server_details, server_version,
     with pytest.raises(ValueError) as e:
         Elasticsearch_v2.verify_es_server_version(server_details)
     assert server_version in str(e.value)
+
+
+def test_search_command_with_query_esql(mocker):
+    """
+    Given
+      - query to the search command with esql
+
+    When
+    - executing the es-esql-search command
+
+    Then
+     - Make sure that the expected message is returned.
+    """
+    MOCKER_RES = {"columns": [{"name": "col_1"}, {"name": "col_2"}], "values": [["val_1", "val_2"], ["val_1_1", "val_2_2"]]}
+    EXPECTED_HEADERS = {
+        "Content-Type": "application/vnd.elasticsearch+json; compatible-with=9",
+        "Accept": "application/vnd.elasticsearch+json; compatible-with=9",
+    }
+    magic_mock = MagicMock()
+    magic_mock.body = MOCKER_RES
+    magic_mock.__getitem__.side_effect = lambda key: magic_mock.body[key]
+
+    import Elasticsearch_v2
+
+    mocked_builder = mocker.patch.object(Elasticsearch_v2, "elasticsearch_builder")
+    mocked_builder().perform_request.return_value = magic_mock
+    mocker.patch.object(Elasticsearch_v2, "ELASTIC_SEARCH_CLIENT", new=Elasticsearch_v2.ELASTICSEARCH_V9)
+
+    query = """FROM alerts | WHERE alertDetails.alertuser LIKE "*karl*"| KEEP *"""
+    res = Elasticsearch_v2.search_esql_command({"query": query, "limit": 2}, {})
+
+    call_args = mocked_builder().perform_request.call_args[1]
+    assert res.outputs_prefix == "Elasticsearch.ESQLSearch"
+    assert res.outputs == [{"col_1": "val_1", "col_2": "val_2"}, {"col_1": "val_1_1", "col_2": "val_2_2"}]
+    assert res.raw_response == magic_mock.body
+    assert call_args["headers"] == EXPECTED_HEADERS
+    assert call_args["body"] == {"query": f"{query}| LIMIT 2"}
+
+
+class TestGetElasticToken:
+    """Tests for the get_elastic_token function."""
+
+    @pytest.fixture
+    def mock_integration_context(self, mocker):
+        """Fixture to mock integration context functions."""
+        mock_get = mocker.patch("Elasticsearch_v2.get_integration_context")
+        mock_set = mocker.patch("Elasticsearch_v2.set_integration_context")
+        return mock_get, mock_set
+
+    @pytest.fixture
+    def mock_requests_post(self, mocker):
+        """Fixture to mock requests.post."""
+        return mocker.patch("Elasticsearch_v2.requests.post")
+
+    def test_get_elastic_token_existing_valid_token(self, mocker, mock_integration_context):
+        """
+        Given:
+            - An existing valid access token in integration context that hasn't expired
+        When:
+            - Calling get_elastic_token
+        Then:
+            - Return the existing access token without making any API calls
+        """
+        import Elasticsearch_v2
+
+        mock_get, mock_set = mock_integration_context
+        future_time = (datetime.now() + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        mock_get.return_value = {
+            "access_token": "existing_valid_token",
+            "access_token_expires_in": future_time,
+            "refresh_token": "refresh_token",
+            "refresh_token_expires_in": future_time,
+        }
+
+        mocker.patch("Elasticsearch_v2.USERNAME", "test_user")
+        mocker.patch("Elasticsearch_v2.PASSWORD", "test_pass")
+        mocker.patch("Elasticsearch_v2.SERVER", "http://test-server")
+        mocker.patch("Elasticsearch_v2.INSECURE", True)
+
+        result = Elasticsearch_v2.get_elastic_token()
+
+        assert result == "existing_valid_token"
+
+    def test_get_elastic_token_expired_token_valid_refresh(self, mocker, mock_integration_context, mock_requests_post):
+        """
+        Given:
+            - An expired access token but a valid refresh token in integration context
+        When:
+            - Calling get_elastic_token
+        Then:
+            - Use the refresh token to get a new access token
+            - Update the integration context with new tokens
+            - Return the new access token
+        """
+        import Elasticsearch_v2
+
+        mock_get, mock_set = mock_integration_context
+        past_time = (datetime.now() - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        future_time = (datetime.now() + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        mock_get.return_value = {
+            "access_token": "expired_token",
+            "access_token_expires_in": past_time,
+            "refresh_token": "valid_refresh_token",
+            "refresh_token_expires_in": future_time,
+        }
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "access_token": "new_access_token",
+            "refresh_token": "new_refresh_token",
+            "expires_in": 3600,
+        }
+        mock_requests_post.return_value = mock_response
+
+        mocker.patch("Elasticsearch_v2.USERNAME", "test_user")
+        mocker.patch("Elasticsearch_v2.PASSWORD", "test_pass")
+        mocker.patch("Elasticsearch_v2.SERVER", "http://test-server")
+        mocker.patch("Elasticsearch_v2.INSECURE", True)
+
+        result = Elasticsearch_v2.get_elastic_token()
+
+        assert result == "new_access_token"
+        assert mock_requests_post.call_count == 1
+        call_args = mock_requests_post.call_args
+        assert call_args[1]["json"]["grant_type"] == "refresh_token"
+        assert call_args[1]["json"]["refresh_token"] == "valid_refresh_token"
+
+    def test_get_elastic_token_password_grant(self, mocker, mock_integration_context, mock_requests_post):
+        """
+        Given:
+            - No existing tokens or expired refresh token
+        When:
+            - Calling get_elastic_token
+        Then:
+            - Perform password grant authentication
+            - Store new tokens in integration context
+            - Return the new access token
+        """
+        import Elasticsearch_v2
+
+        mock_get, mock_set = mock_integration_context
+        mock_get.return_value = {}
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "access_token": "password_grant_token",
+            "refresh_token": "password_grant_refresh",
+            "expires_in": 3600,
+        }
+        mock_requests_post.return_value = mock_response
+
+        mocker.patch("Elasticsearch_v2.USERNAME", "test_user")
+        mocker.patch("Elasticsearch_v2.PASSWORD", "test_pass")
+        mocker.patch("Elasticsearch_v2.SERVER", "http://test-server")
+        mocker.patch("Elasticsearch_v2.INSECURE", True)
+
+        result = Elasticsearch_v2.get_elastic_token()
+
+        assert result == "password_grant_token"
+        assert mock_requests_post.call_count == 1
+        call_args = mock_requests_post.call_args
+        assert call_args[1]["json"]["grant_type"] == "password"
+        assert call_args[1]["json"]["username"] == "test_user"
+        assert call_args[1]["json"]["password"] == "test_pass"
+
+    def test_get_elastic_token_missing_credentials(self, mocker, mock_integration_context):
+        """
+        Given:
+            - Missing username or password
+        When:
+            - Calling get_elastic_token
+        Then:
+            - Raise DemistoException with appropriate error message
+        """
+        import Elasticsearch_v2
+        from CommonServerPython import DemistoException
+
+        mock_get, mock_set = mock_integration_context
+        mock_get.return_value = {}
+
+        mocker.patch("Elasticsearch_v2.USERNAME", None)
+        mocker.patch("Elasticsearch_v2.PASSWORD", "test_pass")
+        mocker.patch("Elasticsearch_v2.SERVER", "http://test-server")
+        mocker.patch("Elasticsearch_v2.INSECURE", True)
+
+        with pytest.raises(DemistoException) as exc_info:
+            Elasticsearch_v2.get_elastic_token()
+
+        assert "username or password fields are missing" in str(exc_info.value)
+
+    def test_get_elastic_token_refresh_fails_fallback_to_password(self, mocker, mock_integration_context, mock_requests_post):
+        """
+        Given:
+            - Expired access token and valid refresh token
+            - Refresh token request fails
+        When:
+            - Calling get_elastic_token
+        Then:
+            - Attempt refresh token flow first
+            - Fall back to password grant when refresh fails
+            - Return new access token from password grant
+        """
+        import Elasticsearch_v2
+
+        mock_get, mock_set = mock_integration_context
+        past_time = (datetime.now() - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        future_time = (datetime.now() + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        mock_get.return_value = {
+            "access_token": "expired_token",
+            "access_token_expires_in": past_time,
+            "refresh_token": "valid_refresh_token",
+            "refresh_token_expires_in": future_time,
+        }
+
+        # First call (refresh) fails, second call (password grant) succeeds
+        mock_refresh_response = MagicMock()
+        mock_refresh_response.status_code = 401
+
+        mock_password_response = MagicMock()
+        mock_password_response.status_code = 200
+        mock_password_response.json.return_value = {
+            "access_token": "new_password_token",
+            "refresh_token": "new_refresh_token",
+            "expires_in": 3600,
+        }
+
+        mock_requests_post.side_effect = [mock_refresh_response, mock_password_response]
+
+        mocker.patch("Elasticsearch_v2.USERNAME", "test_user")
+        mocker.patch("Elasticsearch_v2.PASSWORD", "test_pass")
+        mocker.patch("Elasticsearch_v2.SERVER", "http://test-server")
+        mocker.patch("Elasticsearch_v2.INSECURE", True)
+
+        result = Elasticsearch_v2.get_elastic_token()
+
+        assert result == "new_password_token"
+        assert mock_requests_post.call_count == 2
+        # Verify first call was refresh token
+        assert mock_requests_post.call_args_list[0][1]["json"]["grant_type"] == "refresh_token"
+        # Verify second call was password grant
+        assert mock_requests_post.call_args_list[1][1]["json"]["grant_type"] == "password"
+
+    def test_get_elastic_token_authentication_failure(self, mocker, mock_integration_context, mock_requests_post):
+        """
+        Given:
+            - No existing tokens
+            - Password grant authentication fails
+        When:
+            - Calling get_elastic_token
+        Then:
+            - Raise DemistoException with authentication failure message
+        """
+        import Elasticsearch_v2
+        from CommonServerPython import DemistoException
+
+        mock_get, mock_set = mock_integration_context
+        mock_get.return_value = {}
+
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+        reason = "unable to authenticate user [test_user] for REST request [/_security/oauth2/token]"
+        mock_response.text = json.dumps({"error": {"reason": reason}})
+        mock_requests_post.return_value = mock_response
+
+        mocker.patch("Elasticsearch_v2.USERNAME", "test_user")
+        mocker.patch("Elasticsearch_v2.PASSWORD", "wrong_pass")
+        mocker.patch("Elasticsearch_v2.SERVER", "http://test-server")
+        mocker.patch("Elasticsearch_v2.INSECURE", True)
+
+        with pytest.raises(DemistoException) as exc_info:
+            Elasticsearch_v2.get_elastic_token()
+
+        assert reason in str(exc_info.value)

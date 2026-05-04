@@ -5,7 +5,6 @@ This is the default integration for this content pack when configured by the Dat
 
 ## Configure Armis Event Collector in Cortex
 
-
 | **Parameter** | **Description** | **Required** |
 | --- | --- | --- |
 | Server URL | URL of the Armis instance the event collector should connect to. | True |
@@ -18,7 +17,7 @@ This is the default integration for this content pack when configured by the Dat
 | Events Fetch Interval | Alerts and activity events. | False |
 | Minutes to delay | Number of minutes to delay when fetching events (to handle events creation delay in the Armis database). Default is 10 minutes but note a higher value might be needed for users with heavier traffic. | False |
 | Device Fetch Interval | Time between fetch of devices \(for example 12 hours, 60 minutes, etc.\). | False |
-
+| Enable Concurrent Event Fetching | Enable parallel fetching of multiple event types in a single integration instance. This option optimizes performance and mitigates potential authentication issues when retrieving events across multiple integration instances that utilize the same credentials. | False |
 
 ## Commands
 
@@ -38,10 +37,10 @@ Manual command to fetch and display events. This command is used for developing/
 
 | **Argument Name** | **Description** | **Required** |
 | --- | --- | --- |
-| should_push_events | Set this argument to true in order to create events, otherwise the command will only display them. Possible values are: true, false. Default is false. | Required | 
-| from_date | The date from which to fetch events. The format should be YYYY-MM-DD or YYYY-MM-DDT:HH:MM:SS. If not specified, the current date will be used. | Optional | 
-| event_type | The type of event to fetch. Possible values are: Alerts, Activities, Devices. Default is Alerts. | Optional | 
-| aql | Run your own AQL query to fetch events. | Optional | 
+| should_push_events | Set this argument to true in order to create events, otherwise the command will only display them. Possible values are: true, false. Default is false. | Required |
+| from_date | The date from which to fetch events. The format should be YYYY-MM-DD or YYYY-MM-DDT:HH:MM:SS. If not specified, the current date will be used. | Optional |
+| event_type | The type of event to fetch. Possible values are: Alerts, Activities, Devices. Default is Alerts. | Optional |
+| aql | Run your own AQL query to fetch events. | Optional |
 
 #### Context Output
 

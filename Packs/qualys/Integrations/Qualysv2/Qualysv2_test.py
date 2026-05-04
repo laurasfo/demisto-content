@@ -1,5 +1,5 @@
 import re
-
+from unittest.mock import Mock
 import Qualysv2
 import pytest
 import requests
@@ -61,8 +61,6 @@ WARNING
 ?action=list&since_datetime=2022-12-21T03:42:05Z&truncation_limit=10&id_max=123456"
 ----END_RESPONSE_FOOTER_CSV"""
 
-HOST_LIST_DETECTIONS_RAW_RESPONSE = "<HOST_LIST_VM_DETECTION_OUTPUT> <RESPONSE> </RESPONSE> </HOST_LIST_VM_DETECTION_OUTPUT>"
-
 BASE_URL = "https://server_url.com/"
 SNAPSHOT_ID = "1737885000"
 
@@ -76,24 +74,6 @@ def client() -> Client:
 def util_load_json(path: str):
     with open(path, encoding="utf-8") as f:
         return json.loads(f.read())
-
-
-def mock_client_get_host_list_detection(*args, sleep_time: int | float) -> tuple[str, bool]:
-    """Mocks `Client.get_host_list_detection` method by introducing an artificial delay using the `sleep_time` argument.
-
-    Args:
-        sleep_time (int | float): The number of seconds to sleep.
-
-    Returns:
-        tuple[str, bool]: Raw API response XML string and set_new_limit boolean (indicates if to make the next API call smaller).
-    """
-    if sleep_time:
-        time.sleep(sleep_time)  # sleep to simulate slow API response
-
-    set_new_limit = False
-    host_list_detections = HOST_LIST_DETECTIONS_RAW_RESPONSE
-
-    return host_list_detections, set_new_limit
 
 
 def test_get_activity_logs_events_command(requests_mock: RequestsMocker, client: Client):
@@ -1138,9 +1118,11 @@ class TestClientClass:
         self.client.get_host_list_detection(since_datetime=since_datetime, limit=HOST_LIMIT)
         http_request_kwargs = client_http_request.call_args.kwargs
 
-        assert client_http_request.called_once
+        assert client_http_request.call_count == 1
         assert http_request_kwargs["method"] == "GET"
-        assert http_request_kwargs["url_suffix"] == urljoin(API_SUFFIX, "asset/host/vm/detection/?action=list")
+        assert http_request_kwargs["url_suffix"] == urljoin(
+            API_SUFFIX, "asset/host/vm/detection/?action=list&host_metadata=all&show_cloud_tags=1"
+        )
         assert http_request_kwargs["params"] == {
             "truncation_limit": HOST_LIMIT,
             "vm_scan_date_after": since_datetime,
@@ -1175,7 +1157,7 @@ class TestClientClass:
 
         http_request_kwargs = client_http_request.call_args.kwargs
 
-        assert client_http_request.called_once
+        assert client_http_request.call_count == 1
         assert http_request_kwargs["method"] == "POST"
         assert http_request_kwargs["url_suffix"] == urljoin(API_SUFFIX, "knowledge_base/vuln/?action=list")
         assert http_request_kwargs["params"] == expected_params
@@ -1925,48 +1907,164 @@ def test_send_assets_and_vulnerabilities_to_xsiam(
     assert not send_data_to_xsiam_vulns_kwargs["should_update_health_module"]
 
 
-@pytest.mark.parametrize(
-    "sleep_time, expected_response, expected_set_new_limit",
-    [
-        pytest.param(3, "", True, id="Slow response"),
-        pytest.param(0, HOST_LIST_DETECTIONS_RAW_RESPONSE, False, id="Fast response"),
-    ],
-)
-def test_get_client_host_list_detection_with_timeout(
-    mocker: MockerFixture,
-    client: Client,
-    sleep_time: int | float,
-    expected_response: str,
-    expected_set_new_limit: bool,
-):
+def test_send_assets_and_vulnerabilities_to_xsiam_empty_last_page(mocker: MockerFixture):
     """
     Given:
-        - A since_datetime, no next_page, and the default HOST_LIMIT.
+        - Empty assets and vulnerabilities lists on the closing snapshot (has_next_page=False).
+        - Cumulative counts of 500 assets and 200 vulnerabilities from previous pages.
 
     When:
-        - When calling get_client_host_list_detection_with_timeout with a simulated "slow" and "fast" API responses.
+        - Calling send_assets_and_vulnerabilities_to_xsiam with empty data and has_next_page=False.
 
-    Assert:
-        - Case A (Slow): Ensure empty raw API response and set_new_limit boolean is True (next API call needs to be smaller).
-        - Case B (Fast): Ensure raw API response is unchanged from the original value and set_new_limit boolean is False.
+    Then:
+        - Ensure close_snapshot_if_empty replaces empty lists with [{}] and increments items_count by 1.
+        - Ensure send_data_to_xsiam is called with data=[{}] and items_count=str(count + 1) for both datasets.
     """
-    from Qualysv2 import get_client_host_list_detection_with_timeout
+    cumulative_assets_count = 500
+    cumulative_vulns_count = 200
 
-    thread_timeout = 2  # Slow: Sleep one second more than timeout. Fast: Don't sleep.
+    mock_send_data_to_xsiam = mocker.patch("Qualysv2.send_data_to_xsiam")
 
-    mocker.patch.object(
-        client,
-        "get_host_list_detection",
-        side_effect=lambda *args: mock_client_get_host_list_detection(*args, sleep_time=sleep_time),
+    send_assets_and_vulnerabilities_to_xsiam(
+        assets=[],
+        vulnerabilities=[],
+        cumulative_assets_count=cumulative_assets_count,
+        cumulative_vulns_count=cumulative_vulns_count,
+        has_next_page=False,
+        snapshot_id=SNAPSHOT_ID,
     )
 
-    raw_response, set_new_limit = get_client_host_list_detection_with_timeout(
-        client=client,
-        since_datetime="2025-01-25",
-        next_page="",
-        limit=HOST_LIMIT,
-        thread_timeout=thread_timeout,
-    )
+    send_data_to_xsiam_assets_kwargs = mock_send_data_to_xsiam.mock_calls[0].kwargs
+    send_data_to_xsiam_vulns_kwargs = mock_send_data_to_xsiam.mock_calls[1].kwargs
 
-    assert raw_response == expected_response
-    assert set_new_limit is expected_set_new_limit
+    # Assets: empty list replaced with [{}], items_count incremented by 1
+    assert send_data_to_xsiam_assets_kwargs["data"] == [{}]
+    assert send_data_to_xsiam_assets_kwargs["items_count"] == str(cumulative_assets_count + 1)
+    assert send_data_to_xsiam_assets_kwargs["snapshot_id"] == SNAPSHOT_ID
+
+    # Vulnerabilities: empty list replaced with [{}], items_count incremented by 1
+    assert send_data_to_xsiam_vulns_kwargs["data"] == [{}]
+    assert send_data_to_xsiam_vulns_kwargs["items_count"] == str(cumulative_vulns_count + 1)
+    assert send_data_to_xsiam_vulns_kwargs["snapshot_id"] == SNAPSHOT_ID
+
+
+@pytest.fixture
+def mock_client():
+    client = Mock()
+    return client
+
+
+def test_get_qid_for_cve_single_qid(mock_client):
+    """
+    Given:
+        - A single CVE
+
+    When:
+        - When executing the get_qid_for_cve function
+
+    Then:
+        - Ensure the function returns CommandResults
+        - Ensure the outputs contain the right value
+        - Ensure the outputs_prefix
+    """
+    xml_response = b"""
+    <RESPONSE>
+        <VULN_LIST>
+            <VULN>
+                <QID>12345</QID>
+            </VULN>
+        </VULN_LIST>
+    </RESPONSE>
+    """
+
+    mock_response = Mock()
+    mock_response.content = xml_response
+    mock_client.get_qid_for_cve.return_value = mock_response
+
+    from Qualysv2 import get_qid_for_cve  # Replace 'your_module' with your filename (without .py)
+
+    result = get_qid_for_cve(mock_client, "CVE-2024-0001")
+
+    assert isinstance(result, CommandResults)
+    assert result.outputs == ["12345"]
+    assert result.outputs_prefix == "Qualys.QID"
+
+
+def test_get_qid_for_cve_multiple_qids(mock_client):
+    """
+    Given:
+        - A single CVE
+
+    When:
+        - When executing the get_qid_for_cve function
+
+    Then:
+        - Ensure the outputs contain the right values ( in this case there are 2 qids for the given CVE)
+    """
+    xml_response = b"""
+    <RESPONSE>
+        <VULN_LIST>
+            <VULN><QID>12345</QID></VULN>
+            <VULN><QID>67890</QID></VULN>
+        </VULN_LIST>
+    </RESPONSE>
+    """
+
+    mock_response = Mock()
+    mock_response.content = xml_response
+    mock_client.get_qid_for_cve.return_value = mock_response
+
+    from Qualysv2 import get_qid_for_cve
+
+    result = get_qid_for_cve(mock_client, "CVE-2024-9999")
+
+    assert result.outputs == ["12345", "67890"]
+
+
+@freeze_time("2025-01-01 00:00:00 UTC")
+def test_fetch_assets_and_vulnerabilities_by_date_last_page_empty(mocker: MockerFixture, client: Client):
+    """
+    Given:
+        - Qualys client and last run dictionary with fetch stage, total assets count, and snapshot ID.
+        - The last page of assets returns 0 assets (empty list) but no next page (pagination complete).
+
+    When:
+        - Calling fetch_assets_and_vulnerabilities_by_date with the "assets" stage.
+
+    Then:
+        - Ensure a snapshot closing signal is sent to XSIAM with a placeholder [{}] and the correct items_count.
+        - Ensure the stage transitions to "vulnerabilities".
+    """
+    from contextlib import nullcontext
+
+    mocker.patch("Qualysv2.ExecutionTimeout", return_value=nullcontext(), create=True)
+
+    last_total_assets = 500
+    last_run = {"stage": "assets", "total_assets": last_total_assets, "snapshot_id": SNAPSHOT_ID}
+
+    # Last page returns 0 assets, no next page, no limit reduction needed
+    empty_assets, next_page, set_new_limit = [], "", False
+    mocker.patch("Qualysv2.get_host_list_detections_events", return_value=(empty_assets, next_page, set_new_limit))
+
+    mock_send_data_to_xsiam = mocker.patch("Qualysv2.send_data_to_xsiam")
+    mock_set_assets_last_run = mocker.patch("Qualysv2.demisto.setAssetsLastRun")
+
+    fetch_assets_and_vulnerabilities_by_date(client, last_run)
+
+    send_data_to_xsiam_kwargs: dict = mock_send_data_to_xsiam.call_args.kwargs
+    next_run = mock_set_assets_last_run.call_args[0][0]
+
+    # Should send an empty JSON [{}] to close the snapshot since assets is empty
+    assert send_data_to_xsiam_kwargs["data"] == [{}]
+    assert send_data_to_xsiam_kwargs["vendor"] == VENDOR
+    assert send_data_to_xsiam_kwargs["product"] == "assets"
+    assert send_data_to_xsiam_kwargs["snapshot_id"] == SNAPSHOT_ID
+    assert send_data_to_xsiam_kwargs["items_count"] == str(
+        last_total_assets + 1
+    )  # total_assets + 1 to account for the empty JSON row
+    assert not send_data_to_xsiam_kwargs["should_update_health_module"]
+
+    assert next_run["next_page"] == ""
+    assert next_run["stage"] == "vulnerabilities"
+    assert next_run["total_assets"] == last_total_assets
+    assert next_run["snapshot_id"] == SNAPSHOT_ID

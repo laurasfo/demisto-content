@@ -1,7 +1,7 @@
 import os
 from typing import Any
 
-import cx_Oracle
+import oracledb
 import demistomock as demisto
 import pyodbc
 import pytest
@@ -369,8 +369,8 @@ def test_teradata_connection(mocker, use_ldap: bool, expected_url: str):
 @pytest.mark.parametrize(
     "port, expected_url",
     [
-        ("", pytest.param("trino://username:password@host:8080/schema")),
-        ("1234", pytest.param("trino://username:password@host:1234/schema")),
+        ("", "trino://username:***@host/schema?verify=true"),
+        ("1234", "trino://username:***@host:1234/schema?verify=true"),
     ],
 )
 def test_trino_connection(mocker, port: str, expected_url: str):
@@ -396,7 +396,7 @@ def test_trino_connection(mocker, port: str, expected_url: str):
         ssl_connect=False,
         use_ldap=False,
     )
-    assert mock_create_engine.called_once_with(expected_url)
+    assert str(mock_create_engine.call_args.args[0]) == expected_url
 
 
 @pytest.mark.parametrize(
@@ -511,9 +511,9 @@ def test_loading_relevant_drivers():
     try:
         # make sure oracle manages to load tns client libraries.
         # Will fail, but we want to be sure we don't fail on loading the driver
-        cx_Oracle.connect()
+        oracledb.connect()
     except Exception as ex:
-        assert "ORA-12162" in str(ex)
+        assert "ORA-12162" in str(ex) or "DPY-4027" in str(ex), f"Unexpected Oracle error: {ex}"
 
     # freetds test
     engine = sqlalchemy.create_engine("mssql+pyodbc:///testuser:testpass@127.0.0.1:1433/TEST?driver=FreeTDS")

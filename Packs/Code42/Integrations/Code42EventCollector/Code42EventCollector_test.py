@@ -1,10 +1,22 @@
 import json
+import pytest
 from unittest.mock import MagicMock
+from freezegun import freeze_time
+from pytest_mock import MockerFixture
 
 import requests_toolbelt.sessions
 
 from CommonServerPython import *
-from Code42EventCollector import DATE_FORMAT
+from Code42EventCollector import (
+    DATE_FORMAT,
+    MAX_FETCH_AUDIT_LOGS,
+    MAX_FETCH_FILE_EVENTS,
+    MAX_AUDIT_LOGS_BATCH_SIZE,
+    MAX_FILE_EVENTS_BATCH_SIZE,
+    NEXT_TRIGGER_VALUE,
+    AuditLogLastRun,
+    FileEventLastRun,
+)
 
 TEST_URL = "https://test.com"
 
@@ -18,12 +30,7 @@ def create_mocked_response(response: List[Dict] | Dict, status_code: int = 200) 
 
 def create_file_events(start_id: int, start_date: str, num_of_file_events: int) -> List[Dict[str, Any]]:
     return [
-        {
-            "event": {
-                "id": f"{i}",
-            },
-            "@timestamp": (dateparser.parse(start_date) + timedelta(seconds=i)).strftime(DATE_FORMAT),
-        }
+        {"event": {"id": f"{i}", "inserted": (dateparser.parse(start_date) + timedelta(seconds=i)).strftime(DATE_FORMAT)}}
         for i in range(start_id, start_id + num_of_file_events)
     ]
 
@@ -33,6 +40,20 @@ def create_audit_logs(start_id: int, start_date: str, num_of_audit_logs: int) ->
         {"id": f"{i}", "timestamp": (dateparser.parse(start_date) + timedelta(seconds=i)).strftime(DATE_FORMAT)}
         for i in range(start_id, start_id + num_of_audit_logs)
     ]
+
+
+def get_mock_http_request_from_datetimes(datetimes: list[str]):
+    def mock_request(method: str, url: str, *args, **kwargs):
+        if method == "POST" and "v1/oauth" in url:
+            return create_mocked_response(response={"access_token": "1234", "token_type": "bearer", "expires_in": 10000000})
+        return create_mocked_response(
+            response={
+                "fileEvents": [{"event": {"id": f"{i}", "inserted": dt}} for i, dt in enumerate(datetimes)],
+                "totalCount": len(datetimes),
+            }
+        )
+
+    return mock_request
 
 
 class HttpRequestsMocker:
@@ -145,9 +166,11 @@ def test_fetch_events_no_last_run(mocker):
                 "identifier": "1234",
                 "password": "1234",
             },
+            "event_types_to_fetch": "File,Audit",
         },
     )
     set_last_run_mocker: MagicMock = mocker.patch.object(demisto, "setLastRun")
+    update_module_health_mocker: MagicMock = mocker.patch.object(demisto, "updateModuleHealth")
     mocker.patch.object(demisto, "getLastRun", return_value={})
     mocker.patch.object(demisto, "command", return_value="fetch-events")
     mocker.patch.object(
@@ -160,20 +183,26 @@ def test_fetch_events_no_last_run(mocker):
     file_events = send_events_mocker.call_args_list[0][0][0]
     assert len(file_events) == 1
     assert file_events[0]["eventType"] == Code42EventCollector.EventType.FILE
+    assert update_module_health_mocker.call_args_list[0][0][0] == {"eventsPulled": len(file_events)}
 
     audit_logs = send_events_mocker.call_args_list[1][0][0]
     assert len(audit_logs) == 1
     assert audit_logs[0]["eventType"] == Code42EventCollector.EventType.AUDIT
+    assert update_module_health_mocker.call_args_list[1][0][0] == {"eventsPulled": len(audit_logs)}
 
     last_run_expected_keys = {
         Code42EventCollector.FileEventLastRun.FETCHED_IDS,
         Code42EventCollector.FileEventLastRun.TIME,
+        Code42EventCollector.FileEventLastRun.CUMULATIVE_COUNT,
+        Code42EventCollector.FileEventLastRun.NEXT_TRIGGER,
         Code42EventCollector.AuditLogLastRun.FETCHED_IDS,
         Code42EventCollector.AuditLogLastRun.TIME,
+        Code42EventCollector.AuditLogLastRun.CUMULATIVE_COUNT,
+        Code42EventCollector.AuditLogLastRun.NEXT_TRIGGER,
         "nextTrigger",
     }
 
-    assert last_run_expected_keys == set(set_last_run_mocker.call_args_list[1][0][0].keys())
+    assert last_run_expected_keys == set(set_last_run_mocker.call_args_list[0][0][0].keys())
 
 
 def test_fetch_events_no_last_run_max_fetch_lower_than_available_events(mocker):
@@ -204,9 +233,11 @@ def test_fetch_events_no_last_run_max_fetch_lower_than_available_events(mocker):
             },
             "max_file_events_per_fetch": 500,
             "max_audit_events_per_fetch": 500,
+            "event_types_to_fetch": "File,Audit",
         },
     )
     set_last_run_mocker: MagicMock = mocker.patch.object(demisto, "setLastRun")
+    update_module_health_mocker: MagicMock = mocker.patch.object(demisto, "updateModuleHealth")
     mocker.patch.object(demisto, "getLastRun", return_value={})
     mocker.patch.object(demisto, "command", return_value="fetch-events")
     mocker.patch.object(
@@ -220,11 +251,13 @@ def test_fetch_events_no_last_run_max_fetch_lower_than_available_events(mocker):
     assert len(file_events) == 500
     for file_event in file_events:
         assert file_event["eventType"] == Code42EventCollector.EventType.FILE
+    assert update_module_health_mocker.call_args_list[0][0][0] == {"eventsPulled": len(file_events)}
 
     audit_logs = send_events_mocker.call_args_list[1][0][0]
     assert len(audit_logs) == 500
     for audit_log in audit_logs:
         assert audit_log["eventType"] == Code42EventCollector.EventType.AUDIT
+    assert update_module_health_mocker.call_args_list[1][0][0] == {"eventsPulled": len(audit_logs)}
 
     last_run_expected_keys = {
         Code42EventCollector.FileEventLastRun.FETCHED_IDS,
@@ -234,7 +267,7 @@ def test_fetch_events_no_last_run_max_fetch_lower_than_available_events(mocker):
     }
 
     # make sure all keys in last run are valid
-    assert last_run_expected_keys.issubset(set(set_last_run_mocker.call_args_list[1][0][0].keys()))
+    assert last_run_expected_keys.issubset(set(set_last_run_mocker.call_args_list[0][0][0].keys()))
 
 
 def test_fetch_events_no_last_run_no_audit_logs_yes_file_events(mocker):
@@ -266,9 +299,11 @@ def test_fetch_events_no_last_run_no_audit_logs_yes_file_events(mocker):
             },
             "max_file_events_per_fetch": 500,
             "max_audit_events_per_fetch": 500,
+            "event_types_to_fetch": "File,Audit",
         },
     )
     set_last_run_mocker: MagicMock = mocker.patch.object(demisto, "setLastRun")
+    update_module_health_mocker: MagicMock = mocker.patch.object(demisto, "updateModuleHealth")
     mocker.patch.object(demisto, "getLastRun", return_value={})
     mocker.patch.object(demisto, "command", return_value="fetch-events")
     mocker.patch.object(
@@ -282,17 +317,23 @@ def test_fetch_events_no_last_run_no_audit_logs_yes_file_events(mocker):
     assert len(file_events) == 100
     for file_event in file_events:
         assert file_event["eventType"] == Code42EventCollector.EventType.FILE
+    assert update_module_health_mocker.call_args_list[0][0][0] == {"eventsPulled": len(file_events)}
 
     audit_logs = send_events_mocker.call_args_list[1][0][0]
     assert len(audit_logs) == 0
+    assert update_module_health_mocker.call_args_list[1][0][0] == {"eventsPulled": len(audit_logs)}
 
     last_run_expected_keys = {
         Code42EventCollector.FileEventLastRun.FETCHED_IDS,
         Code42EventCollector.FileEventLastRun.TIME,
+        Code42EventCollector.FileEventLastRun.CUMULATIVE_COUNT,
+        Code42EventCollector.FileEventLastRun.NEXT_TRIGGER,
+        Code42EventCollector.AuditLogLastRun.CUMULATIVE_COUNT,
+        Code42EventCollector.AuditLogLastRun.NEXT_TRIGGER,
         "nextTrigger",
     }
 
-    assert last_run_expected_keys == set(set_last_run_mocker.call_args_list[1][0][0].keys())
+    assert last_run_expected_keys == set(set_last_run_mocker.call_args_list[0][0][0].keys())
 
 
 def test_fetch_events_no_last_run_yes_audit_logs_no_file_events(mocker):
@@ -324,6 +365,7 @@ def test_fetch_events_no_last_run_yes_audit_logs_no_file_events(mocker):
             },
             "max_file_events_per_fetch": 500,
             "max_audit_events_per_fetch": 500,
+            "event_types_to_fetch": "File,Audit",
         },
     )
     set_last_run_mocker: MagicMock = mocker.patch.object(demisto, "setLastRun")
@@ -345,12 +387,16 @@ def test_fetch_events_no_last_run_yes_audit_logs_no_file_events(mocker):
         assert audit_log["eventType"] == Code42EventCollector.EventType.AUDIT
 
     last_run_expected_keys = {
-        Code42EventCollector.AuditLogLastRun.FETCHED_IDS,
         Code42EventCollector.AuditLogLastRun.TIME,
+        Code42EventCollector.AuditLogLastRun.FETCHED_IDS,
+        Code42EventCollector.AuditLogLastRun.CUMULATIVE_COUNT,
+        Code42EventCollector.AuditLogLastRun.NEXT_TRIGGER,
+        Code42EventCollector.FileEventLastRun.NEXT_TRIGGER,
+        Code42EventCollector.FileEventLastRun.CUMULATIVE_COUNT,
         "nextTrigger",
     }
 
-    assert last_run_expected_keys == set(set_last_run_mocker.call_args_list[1][0][0].keys())
+    assert last_run_expected_keys == set(set_last_run_mocker.call_args_list[0][0][0].keys())
 
 
 def test_fetch_events_no_last_run_no_events(mocker):
@@ -377,6 +423,7 @@ def test_fetch_events_no_last_run_no_events(mocker):
                 "identifier": "1234",
                 "password": "1234",
             },
+            "event_types_to_fetch": "File,Audit",
         },
     )
     mocker.patch.object(demisto, "setLastRun")
@@ -395,6 +442,158 @@ def test_fetch_events_no_last_run_no_events(mocker):
 
     audit_logs = send_events_mocker.call_args_list[1][0][0]
     assert len(audit_logs) == 0
+
+
+@freeze_time("2024-01-01 01:00:15 UTC")
+def test_fetch_events_within_look_back(mocker: MockerFixture):
+    """
+    Given:
+     - A run with incidents within the look-back time frame.
+
+    When:
+     - Running fetch events.
+
+    Then:
+     - The next-fetch should be the look-back time rounded down to the first three microsecond digits,
+       and all incidents later than the next-fetch should be kept in the last-run.
+    """
+    from Code42EventCollector import main, FILE_EVENTS_LOOK_BACK, FileEventLastRun
+
+    LOOK_BACK_TIME = datetime.now() - FILE_EVENTS_LOOK_BACK
+
+    mocker.patch("Code42EventCollector.send_events_to_xsiam")
+    mocker.patch.object(
+        demisto,
+        "params",
+        return_value={
+            "url": TEST_URL,
+            "credentials": {
+                "identifier": "1234",
+                "password": "1234",
+            },
+            "max_file_events_per_fetch": 500,
+            "max_audit_events_per_fetch": 500,
+            "event_types_to_fetch": "File",
+        },
+    )
+    mocker.patch.object(
+        requests_toolbelt.sessions.BaseUrlSession,
+        "request",
+        side_effect=get_mock_http_request_from_datetimes(
+            [
+                (LOOK_BACK_TIME + timedelta(seconds=-1)).strftime(DATE_FORMAT),
+                (LOOK_BACK_TIME + timedelta(microseconds=500_200)).strftime(DATE_FORMAT),
+                (LOOK_BACK_TIME + timedelta(microseconds=500_100)).strftime(DATE_FORMAT),
+                (LOOK_BACK_TIME + timedelta(microseconds=500_300)).strftime(DATE_FORMAT),
+            ]
+        ),
+    )
+    set_last_run_mock = mocker.patch.object(demisto, "setLastRun")
+    mocker.patch.object(demisto, "command", return_value="fetch-events")
+
+    main()
+
+    assert set(set_last_run_mock.call_args_list[0][0][0][FileEventLastRun.FETCHED_IDS]) == {"1", "2", "3"}
+    assert set_last_run_mock.call_args_list[0][0][0][FileEventLastRun.TIME] == "2024-01-01 00:59:30.000000Z"
+
+
+@freeze_time("2024-01-01 01:00:15 UTC")
+def test_fetch_events_before_look_back(mocker: MockerFixture):
+    """
+    Given:
+     - A run with incidents before the look-back time frame.
+
+    When:
+     - Running fetch events.
+
+    Then:
+     - The next-fetch should be the latest creation time rounded down to the first three microsecond digits,
+       and all incidents later than the next-fetch should be kept in the last-run.
+    """
+    from Code42EventCollector import main, FILE_EVENTS_LOOK_BACK, FileEventLastRun
+
+    LOOK_BACK_TIME = datetime.now() - FILE_EVENTS_LOOK_BACK
+
+    mocker.patch("Code42EventCollector.send_events_to_xsiam")
+    mocker.patch.object(
+        demisto,
+        "params",
+        return_value={
+            "url": TEST_URL,
+            "credentials": {
+                "identifier": "1234",
+                "password": "1234",
+            },
+            "max_file_events_per_fetch": 500,
+            "max_audit_events_per_fetch": 500,
+            "event_types_to_fetch": "File",
+        },
+    )
+    mocker.patch.object(
+        requests_toolbelt.sessions.BaseUrlSession,
+        "request",
+        side_effect=get_mock_http_request_from_datetimes(
+            [
+                (LOOK_BACK_TIME + timedelta(minutes=-1, microseconds=100_000)).strftime(DATE_FORMAT),
+                (LOOK_BACK_TIME + timedelta(minutes=-1, microseconds=500_200)).strftime(DATE_FORMAT),
+                (LOOK_BACK_TIME + timedelta(minutes=-1, microseconds=500_100)).strftime(DATE_FORMAT),
+                (LOOK_BACK_TIME + timedelta(minutes=-1, microseconds=500_300)).strftime(DATE_FORMAT),
+            ]
+        ),
+    )
+    set_last_run_mock = mocker.patch.object(demisto, "setLastRun")
+    mocker.patch.object(demisto, "command", return_value="fetch-events")
+
+    main()
+
+    assert set(set_last_run_mock.call_args_list[0][0][0][FileEventLastRun.FETCHED_IDS]) == {"1", "2", "3"}
+    assert set_last_run_mock.call_args_list[0][0][0][FileEventLastRun.TIME] == "2024-01-01 00:58:30.500000Z"
+
+
+@freeze_time("2024-01-01 01:00:15 UTC")
+def test_fetch_events_empty_run(mocker: MockerFixture):
+    """
+    Given:
+     - An empty run.
+
+    When:
+     - Running fetch events.
+
+    Then:
+     - The last-run should stay the same.
+    """
+    from Code42EventCollector import main
+
+    mocker.patch("Code42EventCollector.send_events_to_xsiam")
+    mocker.patch.object(
+        demisto,
+        "params",
+        return_value={
+            "url": TEST_URL,
+            "credentials": {
+                "identifier": "1234",
+                "password": "1234",
+            },
+            "max_file_events_per_fetch": 500,
+            "max_audit_events_per_fetch": 500,
+            "event_types_to_fetch": "File",
+        },
+    )
+    mocker.patch.object(
+        requests_toolbelt.sessions.BaseUrlSession, "request", side_effect=HttpRequestsMocker().valid_http_request_side_effect
+    )
+    mocker.patch.object(demisto, "getLastRun", return_value={"LastRun": "previous_last_run"})
+    set_last_run_mock = mocker.patch.object(demisto, "setLastRun")
+    mocker.patch.object(demisto, "command", return_value="fetch-events")
+
+    main()
+
+    assert set_last_run_mock.call_args_list[0][0][0] == {
+        "LastRun": "previous_last_run",
+        "file-event-count": 0,
+        "file-event-next-trigger": None,
+        "nextTrigger": None,
+    }
 
 
 def test_get_events_command(mocker):
@@ -455,3 +654,75 @@ def test_get_events_command(mocker):
     assert command_result.outputs[0]["eventType"] == Code42EventCollector.EventType.FILE
     assert command_result.outputs
     assert command_result.readable_output
+
+
+@pytest.mark.parametrize(
+    "last_run, expected_files_count, expected_files_next_trigger, expected_audits_count, expected_audits_next_trigger",
+    [
+        pytest.param(  # Empty last run (counts incremented and nextTrigger in 3 seconds)
+            {},
+            MAX_FILE_EVENTS_BATCH_SIZE,
+            NEXT_TRIGGER_VALUE,
+            MAX_AUDIT_LOGS_BATCH_SIZE,
+            NEXT_TRIGGER_VALUE,
+            id="First fetch",
+        ),
+        pytest.param(  # Halfway through batching (counts incremented and nextTrigger in 3 seconds)
+            {FileEventLastRun.CUMULATIVE_COUNT.value: 12000, AuditLogLastRun.CUMULATIVE_COUNT.value: 48000},
+            12000 + MAX_AUDIT_LOGS_BATCH_SIZE,
+            NEXT_TRIGGER_VALUE,
+            48000 + MAX_AUDIT_LOGS_BATCH_SIZE,
+            NEXT_TRIGGER_VALUE,
+            id="Middle batch",
+        ),
+        pytest.param(  # Last batch before reaching max fetch (counts reset and no nextTrigger)
+            {FileEventLastRun.CUMULATIVE_COUNT.value: 48000, AuditLogLastRun.CUMULATIVE_COUNT.value: 96000},
+            0,
+            None,
+            0,
+            None,
+            id="Last batch",
+        ),
+    ],
+)
+def test_next_trigger(
+    last_run: dict,
+    expected_files_count: int,
+    expected_files_next_trigger: str | None,
+    expected_audits_count: int,
+    expected_audits_next_trigger: str | None,
+):
+    """
+    Given:
+     - last run value and "File" and "Audit" event types to fetch.
+
+    When:
+     - Fetching in batches.
+
+    Then:
+     - Assert the cumulative count is correctly incremented and nextTrigger is set in the next run when batching is in progress.
+     - Assert the cumulative count is reset and nextTrigger is None in the next run when batching completes.
+    """
+    from Code42EventCollector import fetch_audit_logs, fetch_file_events
+
+    class MockClient:
+        def get_file_events(*_, **__) -> list[dict]:
+            return [
+                {"event": {"id": f"{i}"}, "_time": datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=i)}
+                for i in range(MAX_FILE_EVENTS_BATCH_SIZE)
+            ]
+
+        def get_audit_logs(*_, **__) -> list[dict]:
+            return [
+                {"event": {"id": f"{j}"}, "_time": datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=j)}
+                for j in range(MAX_AUDIT_LOGS_BATCH_SIZE)
+            ]
+
+    _, file_event_last_run = fetch_file_events(MockClient, last_run, MAX_FETCH_FILE_EVENTS)  # type: ignore
+    _, audit_logs_last_run = fetch_audit_logs(MockClient, last_run, MAX_FETCH_AUDIT_LOGS)  # type: ignore
+
+    assert file_event_last_run[FileEventLastRun.CUMULATIVE_COUNT.value] == expected_files_count
+    assert file_event_last_run[FileEventLastRun.NEXT_TRIGGER.value] == expected_files_next_trigger
+
+    assert audit_logs_last_run[AuditLogLastRun.CUMULATIVE_COUNT.value] == expected_audits_count
+    assert audit_logs_last_run[AuditLogLastRun.NEXT_TRIGGER.value] == expected_audits_next_trigger

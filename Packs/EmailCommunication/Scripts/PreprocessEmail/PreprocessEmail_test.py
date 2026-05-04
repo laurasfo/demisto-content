@@ -1,5 +1,4 @@
 import json
-from datetime import datetime
 
 import demistomock as demisto
 import pytest
@@ -87,7 +86,7 @@ EMAIL_HTML_NO_ALT = """
 
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8"><style type="text/css" style="display:none">
 
-<!–
+<!-
 
 p
 
@@ -95,7 +94,7 @@ p
 
     margin-bottom:0}
 
-–>
+->
 
 </style></head>
 <body dir="ltr"><div style="font-family:Calibri,Arial,Helvetica,sans-serif; font-size:12pt; color:rgb(0,0,0)">
@@ -137,12 +136,22 @@ EXPECTED_RESULT_3 = (
     "</u><div>\n<p>please add multiple inline images</p></div></blockquote></div></body></html>"
 )
 
+EXPECTED_RESULT_XSOAR_SAAS = (
+    '\n<html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"></head><body><div '
+    'dir="ltr">image 1:\n<div><div><img src=xsoar/entry/download/37@119 alt="image_1.png" width="275" height="184">'
+    '<br></div></div><div>image 2:\n</div><div><div><img src="cid:ii_kgjzygxz1" alt="image_2.png" width="225" '
+    'height="224"><br></div></div></div><br>\n<div class="gmail_quote"><div dir="ltr" class="gmail_attr">On Thu,'
+    ' Oct 22, 2020 at 1:56 AM Avishai Brandeis &lt;\n<a href="mailto:avishai@demistodev.onmicrosoft.com">'
+    'avishai@demistodev.onmicrosoft.com</a>&gt; wrote:<br></div>\n<blockquote class="gmail_quote" style="margin:'
+    ' 0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204)"><u></u><div>\n<p>please add multiple inline '
+    "images</p></div></blockquote></div></body></html>"
+)
 EXPECTED_RESULT_NO_ALT = """
 <html><head>
 
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8"><style type="text/css" style="display:none">
 
-<!–
+<!-
 
 p
 
@@ -150,7 +159,7 @@ p
 
     margin-bottom:0}
 
-–>
+->
 
 </style></head>
 <body dir="ltr"><div style="font-family:Calibri,Arial,Helvetica,sans-serif; font-size:12pt; color:rgb(0,0,0)">
@@ -182,6 +191,26 @@ def test_create_email_html(email_html, entry_id_list, expected):
     """
     from PreprocessEmail import create_email_html
 
+    result = create_email_html(email_html, entry_id_list)
+    assert result == expected
+
+
+def test_create_email_html_saas(mocker):
+    """
+    Given
+    - The email's Html representation on saas xsoar/xsiam machine.
+    When
+    - Creating the html thread
+    Then
+    - The images' src attribute would be replaced as expected with a prefix of xsoar.
+    """
+
+    from PreprocessEmail import create_email_html
+
+    email_html = EMAIL_HTML
+    entry_id_list = [("image_1.png", "37@119")]
+    expected = EXPECTED_RESULT_XSOAR_SAAS
+    mocker.patch("PreprocessEmail.is_xsiam_or_xsoar_saas", return_value=True)
     result = create_email_html(email_html, entry_id_list)
     assert result == expected
 
@@ -684,7 +713,10 @@ def test_create_thread_context(email_code, scenario, mocker):
     from PreprocessEmail import create_thread_context
 
     # Mock function to get current time string to match the expected result
-    mocker.patch("PreprocessEmail.get_utc_now", return_value=datetime.strptime("2022-02-04T20:58:20UTC", "%Y-%m-%dT%H:%M:%SUTC"))
+    mocker.patch(
+        "PreprocessEmail.get_current_time_in_timezone",
+        return_value="2022-02-04T20:58:20UTC",
+    )
 
     execute_command_mocker = mocker.patch.object(demisto, "executeCommand", side_effect=side_effect_function)
     create_thread_context(
@@ -701,6 +733,7 @@ def test_create_thread_context(email_code, scenario, mocker):
         "end_user@company.com",
         "123",
         "",
+        time_zone="UTC",
     )
     call_args = execute_command_mocker.call_args
     if scenario == "thread_found":
@@ -1097,3 +1130,88 @@ def test_create_email_html_no_image_to_insert(html, entry_id_list, expected_resu
     from PreprocessEmail import create_email_html
 
     assert create_email_html(html, entry_id_list) == expected_result
+
+
+class TestSetEmailReplyXSSPrevention:
+    """Tests for XSS prevention in set_email_reply header fields."""
+
+    def test_xss_in_email_from(self):
+        from PreprocessEmail import set_email_reply
+
+        result = set_email_reply("<script>alert(1)</script>", "to@test.com", "cc@test.com", "<p>body</p>", None)
+        assert "&lt;script&gt;" in result
+        assert "<script>alert(1)</script>" not in result
+
+    def test_xss_in_email_to(self):
+        from PreprocessEmail import set_email_reply
+
+        result = set_email_reply("from@test.com", "<img src=x onerror=alert(1)>", "cc@test.com", "<p>body</p>", None)
+        assert "&lt;img src=x" in result
+        assert "<img src=x onerror=" not in result
+
+    def test_xss_in_email_cc(self):
+        from PreprocessEmail import set_email_reply
+
+        result = set_email_reply("from@test.com", "to@test.com", "<iframe src=evil.com>", "<p>body</p>", None)
+        assert "&lt;iframe" in result
+
+    def test_xss_in_attachment_names(self):
+        from PreprocessEmail import set_email_reply
+
+        attachments = [{"name": "<script>alert(1)</script>"}]
+        result = set_email_reply("from@test.com", "to@test.com", "cc@test.com", "<p>body</p>", attachments)
+        assert "&lt;script&gt;" in result
+        assert "<script>alert(" not in result
+
+    def test_none_fields_render_as_empty(self):
+        from PreprocessEmail import set_email_reply
+
+        result = set_email_reply(None, None, None, "<p>body</p>", None)
+        assert "From:" in result
+        assert "None" not in result
+
+
+class TestCreateEmailHtmlRegexEscape:
+    """Tests for regex injection prevention in create_email_html."""
+
+    def test_filename_with_regex_metacharacters(self):
+        from PreprocessEmail import create_email_html
+
+        malicious_name = "image(1)+[2].png"
+        email_html = '<img src="cid:test" alt="' + malicious_name + '" width="100">'
+        entry_id_list = [(malicious_name, "42@100")]
+        result = create_email_html(email_html, entry_id_list)
+        assert "entry/download/42@100" in result
+
+
+class TestSanitizeHtmlBodyPreprocess:
+    """Tests for HTML body sanitization in PreprocessEmail."""
+
+    def test_strips_script_tags(self):
+        pytest.importorskip("nh3", reason="nh3 not installed in Docker image")
+        from PreprocessEmail import sanitize_html_body
+
+        result = sanitize_html_body("<p>Hello</p><script>alert(1)</script><p>World</p>")
+        assert "<script>" not in result
+        assert "Hello" in result
+
+    def test_strips_onerror_attribute(self):
+        pytest.importorskip("nh3", reason="nh3 not installed in Docker image")
+        from PreprocessEmail import sanitize_html_body
+
+        result = sanitize_html_body('<img src="x" onerror="alert(1)">')
+        assert "onerror" not in result
+
+    def test_empty_input(self):
+        from PreprocessEmail import sanitize_html_body
+
+        assert sanitize_html_body("") == ""
+
+    def test_fallback_when_nh3_unavailable(self, mocker):
+        """Validate graceful fallback when nh3 is not available."""
+        from PreprocessEmail import sanitize_html_body
+
+        mocker.patch.dict("sys.modules", {"nh3": None})
+        malicious_html = "<script>alert(1)</script>"
+        result = sanitize_html_body(malicious_html)
+        assert result == malicious_html

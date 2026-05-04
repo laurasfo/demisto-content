@@ -305,6 +305,13 @@ class STIX2Parser:
         kill_chain_mitre = [chain.get("phase_name", "") for chain in attack_pattern_obj.get("kill_chain_phases", [])]
         kill_chain_phases = [MITRE_CHAIN_PHASES_TO_DEMISTO_FIELDS.get(phase) for phase in kill_chain_mitre]
 
+        # Extract MitreID from external_references
+        mitre_id = ""
+        for external_ref in attack_pattern_obj.get("external_references", []):
+            if external_ref.get("source_name") == "mitre":
+                mitre_id = external_ref.get("external_id", "")
+                break
+
         attack_pattern = {
             "value": attack_pattern_obj.get("name"),
             "indicator_type": ThreatIntel.ObjectsNames.ATTACK_PATTERN,
@@ -312,6 +319,7 @@ class STIX2Parser:
             "rawJSON": attack_pattern_obj,
         }
         fields = {
+            "mitreid": mitre_id,
             "stixid": attack_pattern_obj.get("id"),
             "killchainphases": kill_chain_phases,
             "firstseenbysource": attack_pattern_obj.get("created"),
@@ -319,6 +327,7 @@ class STIX2Parser:
             "description": attack_pattern_obj.get("description", ""),
             "operatingsystemrefs": attack_pattern_obj.get("x_mitre_platforms"),
             "publications": publications,
+            "tags": list(set(attack_pattern_obj.get("labels", []))),
         }
 
         attack_pattern["customFields"] = fields
@@ -428,6 +437,7 @@ class STIX2Parser:
             "kill_chain_phases": kill_chain_phases,
             "firstseenbysource": infrastructure_obj.get("created"),
             "modified": infrastructure_obj.get("modified"),
+            "tags": list(set(infrastructure_obj.get("labels", []))),
         }
 
         infrastructure["customFields"] = fields
@@ -494,6 +504,7 @@ class STIX2Parser:
             "description": tool_obj.get("description", ""),
             "aliases": tool_obj.get("aliases", []),
             "tool_version": tool_obj.get("tool_version", ""),
+            "tags": list(set(tool_obj.get("labels", []))),
         }
 
         tool["customFields"] = fields
@@ -521,6 +532,7 @@ class STIX2Parser:
             "description": coa_obj.get("description", ""),
             "action_type": coa_obj.get("action_type", ""),
             "publications": publications,
+            "tags": list(set(coa_obj.get("labels", []))),
         }
 
         course_of_action["customFields"] = fields
@@ -546,6 +558,7 @@ class STIX2Parser:
             "description": campaign_obj.get("description", ""),
             "aliases": campaign_obj.get("aliases", []),
             "objective": campaign_obj.get("objective", ""),
+            "tags": list(set(campaign_obj.get("labels", []))),
         }
 
         campaign["customFields"] = fields
@@ -577,6 +590,7 @@ class STIX2Parser:
             "primary_motivation": intrusion_set_obj.get("primary_motivation", ""),
             "secondary_motivations": intrusion_set_obj.get("secondary_motivations", []),
             "publications": publications,
+            "tags": list(set(intrusion_set_obj.get("labels", []))),
         }
         intrusion_set["customFields"] = fields
         return [intrusion_set]
@@ -1443,12 +1457,12 @@ class StixDecode:
             for o in observables:
                 gprops = observable_extract_properties(o)
 
-                obj = next((ob for ob in o if ob.name == "Object"), None)
+                obj = next((ob for ob in o if ob.name == "Object"), None)  # type: ignore
                 if obj is None:
                     continue
 
                 # main properties
-                properties = next((c for c in obj if c.name == "Properties"), None)
+                properties = next((c for c in obj if c.name == "Properties"), None)  # type: ignore
                 if properties is not None:
                     for r in StixDecode.object_extract_properties(properties, kwargs):
                         r.update(gprops)
@@ -1457,13 +1471,13 @@ class StixDecode:
                         observable_result.append(r)
 
                 # then related objects
-                related = next((c for c in obj if c.name == "Related_Objects"), None)
+                related = next((c for c in obj if c.name == "Related_Objects"), None)  # type: ignore
                 if related is not None:
                     for robj in related:
-                        if robj.name != "Related_Object":
+                        if robj.name != "Related_Object":  # type: ignore
                             continue
 
-                        properties = next((c for c in robj if c.name == "Properties"), None)
+                        properties = next((c for c in robj if c.name == "Properties"), None)  # type: ignore
                         if properties is None:
                             continue
 
@@ -1474,36 +1488,36 @@ class StixDecode:
 
         # extract the Indicator info
         if (indicators := package.find_all("Indicator")) and observables:
-            indicator_ref = observables[0].get("idref")
+            indicator_ref = observables[0].get("idref")  # type: ignore
 
             if indicator_ref:
                 indicator_info = indicator_extract_properties(indicators[0])
-                indicator_result[indicator_ref] = indicator_info
+                indicator_result[indicator_ref] = indicator_info  # type: ignore
 
         # extract the TTP info
         if ttp := package.find_all("TTP"):
             ttp_info: Dict[str, str] = {}
 
-            id_ref = ttp[0].get("id")
+            id_ref = ttp[0].get("id")  # type: ignore
 
-            title = next((c for c in ttp[0] if c.name == "Title"), None)
+            title = next((c for c in ttp[0] if c.name == "Title"), None)  # type: ignore
             if title is not None:
-                title = title.text
-                ttp_info["stix_ttp_title"] = title
+                title = title.text  # type: ignore
+                ttp_info["stix_ttp_title"] = title  # type: ignore
 
-            description = next((c for c in ttp[0] if c.name == "Description"), None)
+            description = next((c for c in ttp[0] if c.name == "Description"), None)  # type: ignore
             if description is not None:
-                description = description.text
-                ttp_info["ttp_description"] = description
+                description = description.text  # type: ignore
+                ttp_info["ttp_description"] = description  # type: ignore
 
             if behavior := package.find_all("Behavior"):
-                if behavior[0].find_all("Malware"):
+                if behavior[0].find_all("Malware"):  # type: ignore
                     ttp_info.update(ttp_extract_properties(package.find_all("Malware_Instance")[0], "Malware"))
 
-                elif behavior[0].find_all("Attack_Patterns"):
+                elif behavior[0].find_all("Attack_Patterns"):  # type: ignore
                     ttp_info.update(ttp_extract_properties(package.find_all("Attack_Pattern")[0], "Attack Pattern"))
 
-                ttp_result[id_ref] = ttp_info
+                ttp_result[id_ref] = ttp_info  # type: ignore
 
         return timestamp, StixDecode._deduplicate(observable_result), indicator_result, ttp_result
 
@@ -1514,7 +1528,14 @@ def build_observables(file_name):
     indicators = {}
     ttps = {}
 
-    for action, element in etree.iterparse(file_name, events=("start", "end"), recover=True):
+    for action, element in etree.iterparse(
+        file_name,
+        events=("start", "end"),
+        recover=True,
+        resolve_entities=False,
+        load_dtd=False,
+        no_network=True,
+    ):
         if action == "start":
             tag_stack.append(element.tag)
 
@@ -1525,14 +1546,17 @@ def build_observables(file_name):
 
         if action == "end" and element.tag.endswith("STIX_Package"):
             for c in element:
-                content = etree.tostring(c, encoding="unicode")
-                timestamp, observable, indicator, ttp = StixDecode.decode(content)
-                if observable:
-                    observables.extend(observable)
-                if indicator:
-                    indicators.update(indicator)
-                if ttp:
-                    ttps.update(ttp)
+                try:
+                    content = etree.tostring(c, encoding="unicode")
+                    timestamp, observable, indicator, ttp = StixDecode.decode(content)
+                    if observable:
+                        observables.extend(observable)
+                    if indicator:
+                        indicators.update(indicator)
+                    if ttp:
+                        ttps.update(ttp)
+                except Exception as e:
+                    demisto.debug(f"Failed parsing response: {e}")
 
             element.clear()
 

@@ -34,6 +34,8 @@ def util_load_json(path):
 class MockPychromeEventHandler:
     is_mailto = False
     is_private_network_url = False
+    document_url = ""
+    path = ""
 
 
 class MockTab:
@@ -396,7 +398,7 @@ def test_chrome_manager_case_chrome_instances_file_is_empty(mocker):
     browser, chrome_port = chrome_manager()
 
     assert generate_new_chrome_instance_mocker.call_count == 1
-    assert generate_new_chrome_instance_mocker.called_with(instance_id, chrome_options)
+    generate_new_chrome_instance_mocker.assert_called_with(instance_id, chrome_options)
     assert terminate_chrome_mocker.call_count == 0
     assert browser == "browser_object"
     assert chrome_port == "chrome_port"
@@ -428,7 +430,7 @@ def test_chrome_manager_case_chromes_options_exist_and_instance_id_not_linked(mo
     browser, chrome_port = chrome_manager()
 
     assert generate_new_chrome_instance_mocker.call_count == 1
-    assert generate_new_chrome_instance_mocker.called_with(instance_id, chrome_options)
+    generate_new_chrome_instance_mocker.assert_called_with(instance_id, chrome_options)
     assert terminate_chrome_mocker.call_count == 0
     assert browser == "browser_object"
     assert chrome_port == "chrome_port"
@@ -461,7 +463,7 @@ def test_chrome_manager_case_new_chrome_options_and_instance_id(mocker):
     browser, chrome_port = chrome_manager()
 
     assert generate_new_chrome_instance_mocker.call_count == 1
-    assert generate_new_chrome_instance_mocker.called_with(instance_id, chrome_options)
+    generate_new_chrome_instance_mocker.assert_called_with(instance_id, chrome_options)
     assert terminate_chrome_mocker.call_count == 0
     assert browser == "browser_object"
     assert chrome_port == "chrome_port"
@@ -498,7 +500,7 @@ def test_chrome_manager_case_instance_id_exist_but_new_chrome_options(mocker):
 
     assert terminate_chrome_mocker.call_count == 1
     assert generate_new_chrome_instance_mocker.call_count == 1
-    assert generate_new_chrome_instance_mocker.called_with(instance_id, chrome_options)
+    generate_new_chrome_instance_mocker.assert_called_with(instance_id, chrome_options)
     assert browser == "browser_object"
     assert chrome_port == "chrome_port"
 
@@ -575,7 +577,7 @@ def test_get_chrome_browser_error(mocker: MockerFixture):
     def raise_connection_error(url):
         raise requests.exceptions.ConnectionError("connection error")
 
-    mocker.patch.object(rasterize, "count_running_chromes", return_value=1)
+    mocker.patch.object(rasterize, "get_chrome_processes", return_value=["/bin/bash /opt/google/chrome/google-chrome"])
     mocker.patch("pychrome.Browser", side_effect=raise_connection_error)
     mocker.patch("time.sleep")
     debug = mocker.patch.object(demisto, "debug")
@@ -619,6 +621,30 @@ def test_is_mailto_urls(mocker: MockerFixture):
     res = screenshot_image(None, MockTab(), "url", None, None)
 
     assert res == (None, 'URLs that start with "mailto:" cannot be rasterized.\nURL: url')
+
+
+def test_get_frame_tree_url_success(mocker: MockerFixture):
+    """
+    Test the get_frame_tree_url method of PychromeEventHandler with successful retrieval.
+
+    Given:
+        - A PychromeEventHandler object with a mock tab that successfully returns a frame tree
+    When:
+        - Calling the get_frame_tree_url method
+    Then:
+        - Verify the correct URL is returned
+        - Verify the tab_ready_event is not set
+    """
+    mock_tab = mocker.Mock()
+    mock_tab.id = "test_tab_id"
+    mock_tab.Page.getFrameTree.return_value = {"frameTree": {"frame": {"url": "https://test.com"}}}
+
+    mock_event = mocker.Mock()
+
+    handler = PychromeEventHandler(None, mock_tab, mock_event, "https://test.com", 30)
+
+    assert handler.get_frame_tree_url() == "https://test.com"
+    assert not mock_event.set.called
 
 
 def test_screenshot_image_local_file(mocker: MockerFixture):
@@ -868,7 +894,7 @@ def test_remove_leading_zeros_from_ip_addresses(test_input: str, expected: str):
     assert remove_leading_zeros_from_ip_addresses(test_input) == expected
 
 
-def test_handle_request_paused(mocker):
+def test_handle_request_paused(mocker: MockerFixture):
     """
     Given:
         - cloudflare.com as BLOCKED_URLS parameter.
@@ -885,6 +911,7 @@ def test_handle_request_paused(mocker):
     mock_fetch.disable = MagicMock()
     mock_fail_request = mocker.patch.object(mock_fetch, "failRequest", new_callable=MagicMock)
     mock_tab.Fetch = mock_fetch
+    mock_tab.id = "mock_tab_id"
     tab_event_handler = PychromeEventHandler(None, mock_tab, None, "", 0)
 
     tab_event_handler.handle_request_paused(**kwargs)
@@ -900,22 +927,55 @@ def test_retry_loading(mocker: MockerFixture):
     mock_tab = mocker.Mock()
     mock_tab.Page.navigate = mocker.Mock()
     mock_tab.Page.getFrameTree = mocker.Mock(return_value={"frameTree": {"frame": {"url": CHROME_ERROR_URL}}})
-
     mock_event = mocker.Mock()
     handler = PychromeEventHandler(None, mock_tab, mock_event, "file:///test.html", 30)
 
     mocker.patch("time.sleep")
-
+    # Test retry attempts failed
     handler.retry_loading()
 
     assert mock_tab.Page.navigate.call_count == 4
     assert mock_tab.Page.getFrameTree.call_count == DEFAULT_RETRIES_COUNT
-    assert not mock_event.set.called
+    assert mock_event.set.called
 
     # Test successful retry
     mock_tab.Page.getFrameTree.return_value = {"frameTree": {"frame": {"url": "file:///test.html"}}}
     handler.retry_loading()
     assert mock_event.set.called
+
+    # Test getFrameTree failed to return URL
+    mock_tab.Page.getFrameTree.side_effect = pychrome.exceptions.RuntimeException("runtime_exception")
+    handler.retry_loading()
+    assert mock_event.set.called
+
+
+@pytest.mark.parametrize(
+    "exception_class, exception_message",
+    [
+        pytest.param(pychrome.exceptions.RuntimeException, "Tab is closed", id="runtime_exception"),
+        pytest.param(pychrome.exceptions.UserAbortException, "User aborted", id="userabort_exception"),
+    ],
+)
+def test_get_frame_tree_url_exception_handling(exception_class, exception_message, mocker: MockerFixture):
+    """
+    Test the get_frame_tree_url method of PychromeEventHandler with exceptions.
+
+    Given:
+        - A PychromeEventHandler object with a mock tab that raises exceptions
+    When:
+        - Calling the get_frame_tree_url method
+    Then:
+        - Verify an empty string is returned
+    """
+    mock_tab = mocker.Mock()
+    mock_tab.id = "test_tab_id"
+    mock_tab.Page.getFrameTree.side_effect = exception_class(exception_message)
+
+    mock_event = mocker.Mock()
+
+    handler = PychromeEventHandler(None, mock_tab, mock_event, "https://test.com", 30)
+
+    assert handler.get_frame_tree_url() == ""
 
 
 @pytest.mark.parametrize(
@@ -929,7 +989,7 @@ def test_page_frame_stopped_loading(
     url: str, mock_event_set_called: bool, mock_retry_loading_called: bool, mocker: MockerFixture
 ):
     """
-    Test the page_frame_stopped_loading method of PychromeEventHandler.
+    Test the page_frame_stopped_loading method of PychromeEventHandler for normal operation.
 
     This test covers two scenarios:
     1. HTTP URL: Verifies that the event is set when a regular page is loaded.
@@ -940,9 +1000,6 @@ def test_page_frame_stopped_loading(
         mock_event_set_called (bool): Expected state of the event.set() call.
         mock_retry_loading_called (bool): Expected state of the retry_loading() call.
         mocker (MockerFixture): pytest-mock fixture for creating mock objects.
-
-    The test uses parametrization to cover both scenarios and mocking to simulate
-    Chrome tab behavior and verify correct method calls under different conditions.
     """
     mock_tab = mocker.Mock()
     mock_event = mocker.Mock()
@@ -957,6 +1014,44 @@ def test_page_frame_stopped_loading(
 
     assert mock_event.set.called == mock_event_set_called
     assert mock_retry_loading.called == mock_retry_loading_called
+
+
+@pytest.mark.parametrize(
+    "exception_class, exception_message",
+    [
+        pytest.param(pychrome.exceptions.RuntimeException, "Tab has been stopped", id="runtime_exception"),
+        pytest.param(pychrome.exceptions.UserAbortException, "User abort", id="userabort_exception"),
+    ],
+)
+def test_page_frame_stopped_loading_exception_handling(exception_class, exception_message, mocker: MockerFixture):
+    """
+    Test the page_frame_stopped_loading method of PychromeEventHandler for exception handling.
+
+    This test covers exception scenarios:
+    1. RuntimeException: When the tab has been stopped
+    2. UserAbortException: When the tab operation is aborted
+
+    Args:
+        exception_class: The exception class to simulate
+        exception_message: The message for the exception
+        mocker (MockerFixture): pytest-mock fixture for creating mock objects.
+
+    The test verifies that when exceptions occur, the event is properly set
+    to prevent hanging and no retry attempt is made.
+    """
+    mock_tab = mocker.Mock()
+    mock_event = mocker.Mock()
+    mock_tab.Page.getFrameTree.side_effect = exception_class(exception_message)
+
+    handler = PychromeEventHandler(None, mock_tab, mock_event, "http://test.com", 30)
+    handler.start_frame = "test_frame_id"
+
+    mock_retry_loading = mocker.patch.object(handler, "retry_loading")
+
+    handler.page_frame_stopped_loading("test_frame_id")
+
+    assert mock_event.set.called
+    assert not mock_retry_loading.called
 
 
 def test_chrome_manager_one_port_use_same_port(mocker):
@@ -1199,3 +1294,258 @@ def test_rasterize_email_command_error_handling(mocker):
         rasterize_email_command()
 
     mock_error.assert_called_once_with("Test error")
+
+
+def test_extract_content_from_tab_html(mocker):
+    """
+    Given: A tab with HTML content
+    When: Calling extract_content_from_tab
+    Then: Should return markdown-formatted content and final URL
+    """
+    from rasterize import extract_content_from_tab
+
+    mock_tab = mocker.Mock()
+    mock_tab.id = "test_tab_id"
+    mock_tab.Page.getFrameTree.return_value = {"frameTree": {"frame": {"url": "https://example.com"}}}
+    mock_tab.Runtime.evaluate.return_value = {
+        "result": {"value": {"type": "html", "content": "# Test Content\n\nThis is a test."}}
+    }
+
+    content, url = extract_content_from_tab(mock_tab, 30)
+
+    assert content == "# Test Content\n\nThis is a test."
+    assert url == "https://example.com"
+    mock_tab.Runtime.evaluate.assert_called_once()
+
+
+def test_extract_content_from_tab_json(mocker):
+    """
+    Given: A tab with JSON content
+    When: Calling extract_content_from_tab
+    Then: Should return formatted JSON and final URL
+    """
+    from rasterize import extract_content_from_tab
+
+    mock_tab = mocker.Mock()
+    mock_tab.id = "test_tab_id"
+    mock_tab.Page.getFrameTree.return_value = {"frameTree": {"frame": {"url": "https://api.example.com/data"}}}
+    mock_tab.Runtime.evaluate.return_value = {"result": {"value": {"type": "json", "content": '{"key": "value", "number": 123}'}}}
+
+    content, url = extract_content_from_tab(mock_tab, 30)
+
+    assert '"key": "value"' in content
+    assert '"number": 123' in content
+    assert url == "https://api.example.com/data"
+
+
+def test_extract_content_from_tab_empty_content(mocker, capfd):
+    """
+    Given: A tab that returns empty content
+    When: Calling extract_content_from_tab
+    Then: Should raise DemistoException
+    """
+    from rasterize import extract_content_from_tab
+
+    mock_tab = mocker.Mock()
+    mock_tab.id = "test_tab_id"
+    mock_tab.Page.getFrameTree.return_value = {"frameTree": {"frame": {"url": "https://example.com"}}}
+    mock_tab.Runtime.evaluate.return_value = {"result": {"value": {"type": "html", "content": ""}}}
+
+    with capfd.disabled():
+        content, url = extract_content_from_tab(mock_tab, 30)
+
+    assert content.startswith("Extraction Error:")
+    assert url == "https://example.com"
+
+
+def test_extract_content_from_tab_exception(mocker, capfd):
+    """
+    Given: A tab that raises an exception during extraction
+    When: Calling extract_content_from_tab
+    Then: Should return error message
+    """
+    from rasterize import extract_content_from_tab
+
+    mock_tab = mocker.Mock()
+    mock_tab.id = "test_tab_id"
+    mock_tab.Page.getFrameTree.return_value = {"frameTree": {"frame": {"url": "https://example.com"}}}
+    mock_tab.Runtime.evaluate.side_effect = Exception("Test error")
+
+    with capfd.disabled():
+        content, url = extract_content_from_tab(mock_tab, 30)
+
+    assert "Extraction Error:" in content
+    assert "Test error" in content
+    assert url == "https://example.com"
+
+
+def test_extract_text_content_success(mocker, capfd):
+    """
+    Given: A valid URL for text extraction
+    When: Calling extract_text_content
+    Then: Should return extracted content and final URL
+    """
+    from rasterize import extract_text_content
+
+    mock_browser = mocker.Mock()
+    mock_tab = mocker.Mock()
+    mock_tab.id = "test_tab_id"
+
+    mock_handler = mocker.Mock()
+    mock_handler.is_mailto = False
+    mock_handler.is_private_network_url = False
+
+    mocker.patch("rasterize.navigate_to_path", return_value=mock_handler)
+    mocker.patch("rasterize.extract_content_from_tab", return_value=("# Test Content", "https://example.com"))
+
+    with capfd.disabled():
+        content, url = extract_text_content(mock_browser, mock_tab, "https://example.com", 0, 30)
+
+    assert content == "# Test Content"
+    assert url == "https://example.com"
+
+
+def test_extract_text_content_mailto_url(mocker, capfd):
+    """
+    Given: A mailto URL
+    When: Calling extract_text_content
+    Then: Should return None and error message
+    """
+    from rasterize import extract_text_content
+
+    mock_browser = mocker.Mock()
+    mock_tab = mocker.Mock()
+    mock_tab.id = "test_tab_id"
+
+    mock_handler = mocker.Mock()
+    mock_handler.is_mailto = True
+    mock_handler.is_private_network_url = False
+    mock_handler.document_url = "mailto:test@example.com"
+
+    mocker.patch("rasterize.navigate_to_path", return_value=mock_handler)
+
+    with capfd.disabled():
+        content, error_msg = extract_text_content(mock_browser, mock_tab, "mailto:test@example.com", 0, 30)
+
+    assert content is None
+    assert "Cannot rasterize" in error_msg
+    assert "mailto:" in error_msg
+
+
+def test_extract_text_content_private_network(mocker, capfd):
+    """
+    Given: A private network URL
+    When: Calling extract_text_content
+    Then: Should return None and error message
+    """
+    from rasterize import extract_text_content
+
+    mock_browser = mocker.Mock()
+    mock_tab = mocker.Mock()
+    mock_tab.id = "test_tab_id"
+
+    mock_handler = mocker.Mock()
+    mock_handler.is_mailto = False
+    mock_handler.is_private_network_url = True
+    mock_handler.document_url = "http://192.168.1.1"
+
+    mocker.patch("rasterize.navigate_to_path", return_value=mock_handler)
+
+    with capfd.disabled():
+        content, error_msg = extract_text_content(mock_browser, mock_tab, "http://192.168.1.1", 0, 30)
+
+    assert content is None
+    assert "Cannot rasterize" in error_msg
+    assert "private network" in error_msg
+
+
+def test_rasterize_extract_command_success(mocker):
+    """
+    Given: Valid URLs for extraction
+    When: Calling rasterize_extract_command
+    Then: Should return CommandResults with extracted content
+    """
+    from rasterize import rasterize_extract_command
+
+    mock_args = {"url": "https://example.com", "wait_time": "0", "max_page_load_time": "30"}
+    mocker.patch.object(demisto, "args", return_value=mock_args)
+    mocker.patch("rasterize.perform_rasterize", return_value=[("# Test Content", "https://example.com")])
+    mock_return_results = mocker.patch("rasterize.return_results")
+
+    rasterize_extract_command()
+
+    assert mock_return_results.called
+    results = mock_return_results.call_args[0][0]
+    assert len(results) == 1
+    assert results[0].outputs["URL"] == "https://example.com"
+    assert results[0].outputs["Content"] == "# Test Content"
+
+
+def test_rasterize_extract_command_multiple_urls(mocker):
+    """
+    Given: Multiple URLs for extraction
+    When: Calling rasterize_extract_command
+    Then: Should return CommandResults for each URL
+    """
+    from rasterize import rasterize_extract_command
+
+    urls = ["https://example1.com", "https://example2.com"]
+    mock_args = {"url": urls, "wait_time": "0", "max_page_load_time": "30"}
+    mocker.patch.object(demisto, "args", return_value=mock_args)
+    mocker.patch(
+        "rasterize.perform_rasterize",
+        return_value=[("# Content 1", "https://example1.com"), ("# Content 2", "https://example2.com")],
+    )
+    mock_return_results = mocker.patch("rasterize.return_results")
+
+    rasterize_extract_command()
+
+    assert mock_return_results.called
+    results = mock_return_results.call_args[0][0]
+    assert len(results) == 2
+    assert results[0].outputs["URL"] == "https://example1.com"
+    assert results[1].outputs["URL"] == "https://example2.com"
+
+
+def test_rasterize_extract_command_extraction_error(mocker):
+    """
+    Given: A URL that fails extraction
+    When: Calling rasterize_extract_command
+    Then: Should return error CommandResults
+    """
+    from rasterize import rasterize_extract_command
+
+    mock_args = {"url": "https://example.com", "wait_time": "0", "max_page_load_time": "30"}
+    mocker.patch.object(demisto, "args", return_value=mock_args)
+    mocker.patch("rasterize.perform_rasterize", return_value=[("Extraction Error: Test error", "https://example.com")])
+    mock_return_results = mocker.patch("rasterize.return_results")
+
+    rasterize_extract_command()
+
+    assert mock_return_results.called
+    results = mock_return_results.call_args[0][0]
+    assert len(results) == 1
+    assert results[0].entry_type == EntryType.ERROR
+    assert "Error extracting content" in results[0].readable_output
+
+
+def test_rasterize_extract_command_string_error(mocker):
+    """
+    Given: A URL that returns a string error
+    When: Calling rasterize_extract_command
+    Then: Should return error CommandResults
+    """
+    from rasterize import rasterize_extract_command
+
+    mock_args = {"url": "https://example.com", "wait_time": "0", "max_page_load_time": "30"}
+    mocker.patch.object(demisto, "args", return_value=mock_args)
+    mocker.patch("rasterize.perform_rasterize", return_value=["Error: Connection failed"])
+    mock_return_results = mocker.patch("rasterize.return_results")
+
+    rasterize_extract_command()
+
+    assert mock_return_results.called
+    results = mock_return_results.call_args[0][0]
+    assert len(results) == 1
+    assert results[0].entry_type == EntryType.ERROR
+    assert "Error rasterizing" in results[0].readable_output

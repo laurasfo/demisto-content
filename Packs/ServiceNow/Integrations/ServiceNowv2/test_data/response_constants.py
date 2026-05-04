@@ -2710,7 +2710,7 @@ RESPONSE_ITEM_DETAILS = {
                     },
                     {
                         "index": 5,
-                        "label": "T-Mobile USA",
+                        "label": "TestMobile USA",
                         "price": 0,
                         "price_currency": "USD",
                         "recurring_price": 0,
@@ -3496,11 +3496,14 @@ MIRROR_ENTRIES_WITH_EMPTY_USERNAME = [
 
 OAUTH_PARAMS = {
     "insecure": False,
-    "credentials": {"identifier": "user1", "password:": "12345"},
+    "username": "user1",
+    "password": "12345",
     "proxy": False,
     "client_id": "client_id",
     "client_secret": "client_secret",
     "use_oauth": True,
 }
+
+JWT_PARAMS = {"private_key": "-----BEGIN PRIVATE KEY----- test_token -----END PRIVATE KEY-----", "kid": "test1", "sub": "test"}
 
 RESPONSE_GENERIC_TICKET = {"sys_created_by": "svc.SecOps_SplunkPhantom", "sys_class_name": "sn_si_incident"}

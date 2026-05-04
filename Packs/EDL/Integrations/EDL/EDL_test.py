@@ -9,7 +9,20 @@ from tempfile import mkdtemp
 
 import demistomock as demisto
 import pytest
-from EDL import DONT_COLLAPSE, check_platform_and_version, datetime, get_indicators_to_format, initialize_edl_context, timezone
+from EDL import (
+    DONT_COLLAPSE,
+    check_platform_and_version,
+    datetime,
+    get_indicators_to_format,
+    initialize_edl_context,
+    timezone,
+    RequestArguments,
+    FORMAT_TEXT,
+    FORMAT_CSV,
+    FORMAT_JSON,
+    FORMAT_MWG,
+    FORMAT_PROXYSG,
+)
 from freezegun import freeze_time
 
 IOC_RES_LEN = 38
@@ -832,6 +845,71 @@ class TestHelperFunctions:
         assert res.collapse_ips == COLLAPSE_TO_RANGES
         assert res.add_comment_if_empty == request_args["ce"]
 
+    @pytest.mark.parametrize(
+        "ip_networks, expected_output",
+        [
+            pytest.param(["192.168.1.1/32"], {"192.168.1.1"}, id="single_ip_without_suffix"),
+            pytest.param(["192.168.1.0/24"], {"192.168.1.0/24"}, id="small_cidr_block"),
+            pytest.param(["10.0.0.0/24", "172.16.0.0/16"], {"10.0.0.0/24", "172.16.0.0/16"}, id="multiple_cidr_blocks"),
+            pytest.param(["192.168.1.1/32", "10.0.0.0/8"], {"192.168.1.1", "10.0.0.0/8"}, id="mix_single_ip_and_cidr"),
+            pytest.param(["0.0.0.0/0"], {"0.0.0.0/0"}, id="very_large_cidr_entire_ipv4_space"),
+        ],
+    )
+    def test_ip_groups_to_cidrs(self, ip_networks, expected_output):
+        """
+        Given:
+            - An iterable of IPNetwork objects representing IP addresses or CIDR blocks
+        When:
+            - Calling ip_groups_to_cidrs to collapse IP groups to CIDR notation
+        Then:
+            - Returns a set of CIDR strings with single IPs without /32 suffix
+            - Handles very large CIDR blocks without raising IndexError
+        """
+        from netaddr import IPNetwork
+        from EDL import ip_groups_to_cidrs
+
+        # Convert string CIDRs to IPNetwork objects
+        ip_network_objects = [IPNetwork(cidr) for cidr in ip_networks]
+
+        result = ip_groups_to_cidrs(ip_network_objects)
+
+        assert result == expected_output
+
+    @pytest.mark.parametrize(
+        "ip_ranges, expected_output",
+        [
+            pytest.param(["192.168.1.1"], {"192.168.1.1"}, id="single_ip"),
+            pytest.param(
+                ["192.168.1.1", "192.168.1.2", "192.168.1.3"], {"192.168.1.1-192.168.1.3"}, id="consecutive_ips_to_range"
+            ),
+            pytest.param(["192.168.1.1", "192.168.1.5"], {"192.168.1.1", "192.168.1.5"}, id="non_consecutive_ips"),
+            pytest.param(
+                ["10.0.0.1", "10.0.0.2", "172.16.0.1"], {"10.0.0.1-10.0.0.2", "172.16.0.1"}, id="mix_range_and_single_ip"
+            ),
+            pytest.param(["0.0.0.0/0"], {"0.0.0.0-255.255.255.255"}, id="very_large_range_entire_ipv4_space"),
+        ],
+    )
+    def test_ip_groups_to_ranges(self, ip_ranges, expected_output):
+        """
+        Given:
+            - An iterable of IP addresses or CIDR blocks
+        When:
+            - Calling ip_groups_to_ranges to collapse IP groups to range notation
+        Then:
+            - Returns a set of IP range strings (e.g., '192.168.1.1-192.168.1.3')
+            - Single IPs are returned as-is without range notation
+            - Handles very large IP ranges without raising IndexError
+        """
+        from netaddr import IPSet
+        from EDL import ip_groups_to_ranges
+
+        # Convert IPs to IPRange objects using IPSet
+        ip_range_objects = IPSet(ip_ranges).iter_ipranges()
+
+        result = ip_groups_to_ranges(ip_range_objects)
+
+        assert result == expected_output
+
 
 def test_initialize_edl_context():
     """
@@ -1404,3 +1482,25 @@ def test_store_log_data(mocker, wip_exist):
     request_args = edl.RequestArguments()
     edl.store_log_data(request_args, datetime.now(), {})
     assert Path(edl.EDL_FULL_LOG_PATH).exists() == wip_exist
+
+
+@pytest.mark.parametrize(
+    "out_format, fields_to_present, expected",
+    [
+        # Case 1: use_legacy_query returns ""
+        (FORMAT_TEXT, "use_legacy_query", ""),
+        # Case 2: FORMAT_CSV with 'all' returns ""
+        (FORMAT_CSV, "all", ""),
+        # Case 3: FORMAT_JSON with 'value' replaced to 'name'
+        (FORMAT_JSON, "value,type", "name,type"),
+        # Case 4: FORMAT_MWG with no fields_to_present
+        (FORMAT_MWG, "", RequestArguments.FILTER_FIELDS_ON_FORMAT_MWG),
+        # Case 5: FORMAT_PROXYSG with no fields_to_present
+        (FORMAT_PROXYSG, "", RequestArguments.FILTER_FIELDS_ON_FORMAT_PROXYSG),
+        # Case 6: Unknown format fallback to FILTER_FIELDS_ON_FORMAT_TEXT
+        ("unknown_format", "", RequestArguments.FILTER_FIELDS_ON_FORMAT_TEXT),
+    ],
+)
+def test_get_fields_to_present(out_format, fields_to_present, expected):
+    args = RequestArguments(out_format=out_format, fields_to_present=fields_to_present)
+    assert args.fields_to_present == expected

@@ -709,43 +709,62 @@ class EWSClient:
 
     def reply_email(
         self,
-        inReplyTo: str,
+        in_reply_to: str,
         to: list[str],
         body: str,
         subject: str,
         bcc: list[str],
         cc: list[str],
-        htmlBody: Optional[str],
+        html_body: str | None,
         attachments: list,
-        from_mailbox: Optional[str] = None,
-        account: Optional[Account] = None,
+        from_mailbox: str | None = None,
+        account: Account | None = None,
+        handle_inline_image: bool = True,
     ) -> Message:
-        """
-        Send a reply email using the EWS account associated with this client or the provided account,
-        based on the provided parameters.
+        """Send a reply email using the EWS account.
 
-        :param inReplyTo: ID of the email to reply to
-        :param to: List of email addresses for the "To" field
-        :param body: Body of the email
-        :param subject: Subject of the email
-        :param bcc: List of 'BCC' email addresses
-        :param cc: List of 'CC' email addresses
-        :param htmlBody: HTML body of the email (overrides body)
-        :param attachments: List of attachments to include in the email
-        :param from_mailbox: Email address of the sender (optional)
-        :param account: Account for the mailbox containing the email to reply to (optional)
+        Sends a reply email using the EWS account associated with this client or the provided
+        account, based on the provided parameters.
 
-        :return: The sent message
+        Args:
+            in_reply_to (str): ID of the email to reply to.
+            to (list[str]): List of email addresses for the "To" field.
+            body (str): Body of the email.
+            subject (str): Subject of the email.
+            bcc (list[str]): List of 'BCC' email addresses.
+            cc (list[str]): List of 'CC' email addresses.
+            html_body (str | None): HTML body of the email (overrides body).
+            attachments (list): List of attachments to include in the email.
+            from_mailbox (str | None, optional): Email address of the sender. Defaults to None.
+            account (Account | None, optional): Account for the mailbox containing the email to reply to. Defaults to None.
+            handle_inline_image (bool, optional): Whether to process inline images in the HTML body. Defaults to True.
+
+        Returns:
+            Message: The sent message.
         """
+        demisto.debug(
+            f"reply_email: Starting with params: in_reply_to={in_reply_to}, to={to}, subject='{subject}', "
+            f"cc={cc}, bcc={bcc}, from_mailbox={from_mailbox}, handle_inline_image={handle_inline_image}, "
+            f"has_html_body={html_body is not None}, attachment_count={len(attachments)}"
+        )
+
         if not account:
+            demisto.debug("reply_email: No account provided, using default account")
             account = self.get_account()
-        item_to_reply_to = account.inbox.get(id=inReplyTo)  # pylint: disable=E1101
+
+        item_to_reply_to: Message | ErrorItemNotFound = account.inbox.get(id=in_reply_to)
         if isinstance(item_to_reply_to, ErrorItemNotFound):
+            demisto.debug(f"reply_email: Failed to find original message with ID {in_reply_to}")
             raise Exception(item_to_reply_to)
 
-        subject = subject or item_to_reply_to.subject
-        htmlBody, htmlAttachments = handle_html(htmlBody) if htmlBody else (None, [])
-        message_body = HTMLBody(htmlBody) if htmlBody else body
+        subject = subject or item_to_reply_to.subject or ""  # type: ignore[assignat]
+        html_attachments: list = []
+        if html_body and handle_inline_image:
+            demisto.debug("reply_email: Processing HTML body for inline images")
+            html_body, html_attachments = handle_html(html_body)
+            demisto.debug(f"reply_email: Found {len(html_attachments)} inline images in {html_body=}")
+
+        message_body = HTMLBody(html_body) if html_body else body
         reply = item_to_reply_to.create_reply(
             subject="Re: " + subject,
             body=message_body,
@@ -757,9 +776,10 @@ class EWSClient:
         reply = reply.save(account.drafts)
         m = account.inbox.get(id=reply.id)  # pylint: disable=E1101
 
-        attachments += htmlAttachments
-        for attachment in attachments:
+        attachments += html_attachments
+        for i, attachment in enumerate(attachments):
             if not isinstance(attachment, FileAttachment):
+                demisto.debug(f"reply_email: Converting attachment {i+1}/{len(attachments)} to FileAttachment")
                 if not attachment.get("cid"):
                     attachment = FileAttachment(name=attachment.get("name"), content=attachment.get("data"))
                 else:
@@ -928,6 +948,27 @@ def switch_hr_headers(obj, hr_header_changes: dict):
     return obj_copy
 
 
+def escape_hr_item_ids(items: Union[list[dict], dict]) -> Union[list[dict], dict]:
+    """Escape ``+`` in the ``itemId`` field of *items* for human-readable markdown output.
+
+    ``+`` characters in Exchange item IDs can be interpreted as italic / underline
+    formatting by markdown renderers.  This function replaces ``+`` with ``\\+``
+    in the ``itemId`` value so the ID is displayed literally.
+
+    Note: This mutates the dicts in-place and should only be called on HR copies,
+    not on the original context data.
+    """
+
+    def _escape_single(item: dict) -> dict:
+        if isinstance(item, dict) and isinstance(item.get(ITEM_ID), str):
+            item[ITEM_ID] = item[ITEM_ID].replace("+", "\\+")
+        return item
+
+    if isinstance(items, list):
+        return [_escape_single(i) for i in items]
+    return _escape_single(items)
+
+
 def get_entry_for_object(
     title: str, context_key: str, obj, headers: Optional[list] = None, hr_header_changes: dict = {}, filter_null_values=True
 ) -> CommandResults:
@@ -953,6 +994,8 @@ def get_entry_for_object(
             obj = [filter_dict_null(k) for k in obj]
         hr_obj = [switch_hr_headers(k, hr_header_changes) for k in obj]
 
+    hr_obj = escape_hr_item_ids(hr_obj)
+
     if headers and isinstance(obj, dict):
         headers = list(set(headers).intersection(set(obj.keys())))
 
@@ -963,18 +1006,16 @@ def get_entry_for_object(
     )
 
 
-def delete_attachments_for_message(
-    client: EWSClient, item_id: str, target_mailbox: Optional[str] = None, attachment_ids=None
-) -> list[CommandResults]:
+def delete_attachments_for_message(client: EWSClient, args: dict) -> list[CommandResults]:
     """
     Deletes attachments for a given message
     :param client: EWS Client
-    :param item_id: item id
-    :param (Optional) target_mailbox: target mailbox
-    :param (Optional) attachment_ids: attachment ids to delete
+    :param args: dict of command arguments
     :return: entries that were deleted
     """
-    attachment_ids = argToList(attachment_ids)
+    item_id = args.get("item_id", "")
+    target_mailbox = args.get("target_mailbox")
+    attachment_ids = argToList(args.get("attachment_ids"))
     attachments = client.get_attachments_for_item(item_id, target_mailbox, attachment_ids)
     deleted_file_attachments = []
     deleted_item_attachments = []
@@ -1012,7 +1053,7 @@ def delete_attachments_for_message(
     return entries
 
 
-def get_searchable_mailboxes(client: EWSClient) -> CommandResults:
+def get_searchable_mailboxes(client: EWSClient, args: dict) -> CommandResults:
     """
     Retrieve searchable mailboxes command
     :param client: EWS Client
@@ -1030,24 +1071,21 @@ def get_searchable_mailboxes(client: EWSClient) -> CommandResults:
 
 def move_item_between_mailboxes(
     src_client: EWSClient,
-    item_id,
-    destination_mailbox: str,
-    destination_folder_path: str,
+    args: dict,
     dest_client: Optional[EWSClient] = None,
-    source_mailbox: Optional[str] = None,
-    is_public: Optional[bool] = None,
 ) -> CommandResults:
     """
     Moves item between mailboxes
     :param src_client: EWS Client for the source mailbox
-    :param item_id: item id
-    :param destination_mailbox: destination mailbox
-    :param destination_folder_path: destination folder path
+    :param args: dict of command arguments
     :param (Optional) dest_client: EWS Client for the destination mailbox (For O365 since target mailbox impacts authentication)
-    :param (Optional) source_mailbox: source mailbox (Defaults to account_email)
-    :param (Optional) is_public: is the destination folder public
     :return: result object
     """
+    item_id = args.get("item_id", "")
+    destination_mailbox = args.get("destination_mailbox", "")
+    destination_folder_path = args.get("destination_folder_path", "")
+    source_mailbox = args.get("source_mailbox")
+    is_public = argToBoolean(args.get("is_public", False))
     if dest_client is None:
         dest_client = src_client
 
@@ -1077,20 +1115,18 @@ def move_item_between_mailboxes(
 
 def move_item(
     client: EWSClient,
-    item_id: str,
-    target_folder_path: str,
-    target_mailbox: Optional[str] = None,
-    is_public: Optional[bool] = None,
+    args: dict,
 ) -> CommandResults:
     """
     Moves an item within the same mailbox
     :param client: EWS Client
-    :param item_id: item id
-    :param target_folder_path: target folder path
-    :param (Optional) target_mailbox: mailbox containing the item (defaults to account email)
-    :param (Optional) is_public: is the destination folder public (default - False)
+    :param args: dict of command arguments
     :return: result object
     """
+    item_id = args.get("item_id", "")
+    target_folder_path = args.get("target_folder_path", "")
+    target_mailbox = args.get("target_mailbox")
+    is_public = argToBoolean(args.get("is_public", False))
     account = client.get_account(target_mailbox)
     is_public = client.is_default_folder(target_folder_path, is_public)
     target_folder = client.get_folder_by_path(target_folder_path, is_public=is_public)
@@ -1111,15 +1147,16 @@ def move_item(
     )
 
 
-def delete_items(client: EWSClient, item_ids, delete_type: str, target_mailbox: Optional[str] = None) -> CommandResults:
+def delete_items(client: EWSClient, args: dict) -> CommandResults:
     """
     Delete items in a mailbox
     :param client: EWS Client
-    :param item_ids: items ids to delete
-    :param delete_type: delete type soft/hard
-    :param (Optional) target_mailbox: mailbox containing the items (defaults to account email)
+    :param args: dict of command arguments
     :return: result object
     """
+    item_ids = args.get("item_ids", "")
+    delete_type = args.get("delete_type", "")
+    target_mailbox = args.get("target_mailbox")
     deleted_items = []
     item_ids = argToList(item_ids)
     items = client.get_items_from_mailbox(target_mailbox, item_ids)
@@ -1152,13 +1189,14 @@ def delete_items(client: EWSClient, item_ids, delete_type: str, target_mailbox: 
     )
 
 
-def get_out_of_office_state(client: EWSClient, target_mailbox: Optional[str] = None) -> CommandResults:
+def get_out_of_office_state(client: EWSClient, args: dict) -> CommandResults:
     """
     Retrieve get out of office state of the targeted mailbox
     :param client: EWS Client
-    :param (Optional) target_mailbox: target mailbox
+    :param args: dict of command arguments
     :return: result object
     """
+    target_mailbox = args.get("target_mailbox")
     account = client.get_account(target_mailbox)
     oof = account.oof_settings
     if not oof:
@@ -1184,20 +1222,18 @@ def get_out_of_office_state(client: EWSClient, target_mailbox: Optional[str] = N
 
 def recover_soft_delete_item(
     client: EWSClient,
-    message_ids,
-    target_folder_path: str = "Inbox",
-    target_mailbox: Optional[str] = None,
-    is_public: Optional[bool] = None,
+    args: dict,
 ) -> CommandResults:
     """
     Recovers soft deleted items
     :param client: EWS Client
-    :param message_ids: Message ids to recover
-    :param (Optional) target_folder_path: target folder path
-    :param (Optional) target_mailbox: target mailbox
-    :param (Optional) is_public: is the target folder public
+    :param args: dict of command arguments
     :return: result object
     """
+    message_ids = args.get("message_ids", "")
+    target_folder_path = args.get("target_folder_path", "Inbox")
+    target_mailbox = args.get("target_mailbox")
+    is_public = argToBoolean(args.get("is_public", False))
     account = client.get_account(target_mailbox)
     is_public = client.is_default_folder(target_folder_path, is_public)
     target_folder = client.get_folder_by_path(target_folder_path, account, is_public)
@@ -1223,15 +1259,16 @@ def recover_soft_delete_item(
     )
 
 
-def create_folder(client: EWSClient, new_folder_name: str, folder_path: str, target_mailbox: Optional[str] = None) -> str:
+def create_folder(client: EWSClient, args: dict) -> str:
     """
     Creates a folder in the target mailbox or the client mailbox
     :param client: EWS Client
-    :param new_folder_name: new folder name
-    :param folder_path: path of the new folder
-    :param (Optional) target_mailbox: target mailbox
+    :param args: dict of command arguments
     :return: Result message
     """
+    new_folder_name = args.get("new_folder_name", "")
+    folder_path = args.get("folder_path", "")
+    target_mailbox = args.get("target_mailbox")
     account = client.get_account(target_mailbox)
     full_path = os.path.join(folder_path, new_folder_name)
     try:
@@ -1251,15 +1288,16 @@ def create_folder(client: EWSClient, new_folder_name: str, folder_path: str, tar
     return f"Folder {full_path} created successfully"
 
 
-def mark_item_as_junk(client: EWSClient, item_id, move_items: str, target_mailbox: Optional[str] = None) -> CommandResults:
+def mark_item_as_junk(client: EWSClient, args: dict) -> CommandResults:
     """
     Marks item as junk in the target mailbox or client mailbox
     :param client: EWS Client
-    :param item_id: item ids to mark as junk
-    :param move_items: 'yes' or 'no' - to move or not to move to the junk folder
-    :param (Optional) target_mailbox: target mailbox the item is in
+    :param args: dict of command arguments
     :return: Results object
     """
+    item_id = args.get("item_id", "")
+    move_items = args.get("move_items", "")
+    target_mailbox = args.get("target_mailbox")
     account = client.get_account(target_mailbox)
     move_to_junk: bool = move_items.lower() == "yes"
     ews_result = MarkAsJunk(account=account).call(item_id=item_id, move_item=move_to_junk)
@@ -1309,17 +1347,16 @@ def folder_to_context_entry(f) -> dict:
     return {}
 
 
-def get_folder(
-    client: EWSClient, folder_path: str, target_mailbox: Optional[str] = None, is_public: Optional[bool] = None
-) -> CommandResults:
+def get_folder(client: EWSClient, args: dict) -> CommandResults:
     """
     Retrieve a folder from the target mailbox or client mailbox
     :param client: EWS Client
-    :param folder_path: folder path to retrieve
-    :param (Optional) target_mailbox: target mailbox to get the folder from
-    :param (Optional) is_public: is the folder public
+    :param args: dict of command arguments
     :return: Results object
     """
+    folder_path = args.get("folder_path", "")
+    target_mailbox = args.get("target_mailbox")
+    is_public = argToBoolean(args.get("is_public", False))
     account = client.get_account(target_mailbox)
     is_public = client.is_default_folder(folder_path, is_public)
     folder = folder_to_context_entry(client.get_folder_by_path(folder_path, account=account, is_public=is_public))
@@ -1329,14 +1366,15 @@ def get_folder(
     )
 
 
-def get_expanded_group(client: EWSClient, email_address, recursive_expansion: bool = False) -> CommandResults:
+def get_expanded_group(client: EWSClient, args: dict) -> CommandResults:
     """
     Retrieve expanded group command
     :param client: EWS Client
-    :param email_address: Email address of the group to expand
-    :param (Optional) recursive_expansion: Whether to enable recursive expansion. Default is 'False'.
+    :param args: dict of command arguments
     :return: Results object containing expanded groups
     """
+    email_address = args.get("email_address", "")
+    recursive_expansion = argToBoolean(args.get("recursive_expansion", False))
     group_members = ExpandGroup(protocol=client.get_protocol()).call(email_address, recursive_expansion)
     group_details = {"name": email_address, "members": group_members}
     entry_for_object = get_entry_for_object(
@@ -1346,17 +1384,16 @@ def get_expanded_group(client: EWSClient, email_address, recursive_expansion: bo
     return entry_for_object
 
 
-def mark_item_as_read(
-    client: EWSClient, item_ids, operation: str = "read", target_mailbox: Optional[str] = None
-) -> CommandResults:
+def mark_item_as_read(client: EWSClient, args: dict) -> CommandResults:
     """
     Marks item as read
     :param client: EWS Client
-    :param item_ids: items ids to mark as read
-    :param (Optional) operation: operation to execute
-    :param (Optional) target_mailbox: target mailbox
+    :param args: dict of command arguments
     :return: results object
     """
+    item_ids = args.get("item_ids", "")
+    operation = args.get("operation", "read")
+    target_mailbox = args.get("target_mailbox")
     marked_items = []
     item_ids = argToList(item_ids)
     items = client.get_items_from_mailbox(target_mailbox, item_ids)
